@@ -4,10 +4,10 @@ import socket
 import threading
 import unittest
 
-from mouse_compartido import protocolo as P
-from mouse_compartido.conexion import Conexion, ConexionCerrada
-from mouse_compartido.pantallas import IZQUIERDA
-from mouse_compartido.seguridad import (
+from mouse_compartido.red import protocolo as P
+from mouse_compartido.red.conexion import Conexion, ConexionCerrada
+from mouse_compartido.comun.pantallas import IZQUIERDA
+from mouse_compartido.red.seguridad import (
     FalloAutenticacion,
     autenticar_como_cliente,
     autenticar_como_servidor,

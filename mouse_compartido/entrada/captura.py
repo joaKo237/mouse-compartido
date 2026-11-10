@@ -13,74 +13,42 @@ import threading
 import time
 from ctypes import wintypes as wt
 
-from . import protocolo as P
-from . import win32 as W
+from ..comun.registro import log
+from ..red import protocolo as P
+from ..sistema import win32 as W
+from .cursor import VentanaCursorInvisible
 from .logica_captura import (
     LogicaCaptura,
     PEDIDO_CONECTADO,
     PEDIDO_DESCONECTADO,
     PEDIDO_ESTACIONAR,
+    PEDIDO_PAUSA,
     PEDIDO_RESTAURAR,
     PEDIDO_VOLVER,
 )
-from .registro import log
 
-_TAM_VENTANA = 64
 _INTERVALO_TIC_MS = 10
 _TICS_POR_VIGILANCIA = 50  # 50 tics de 10 ms = medio segundo.
 _TOLERANCIA_CURSOR_PX = 3
+# Cada evento del mouse trae la hora en que Windows lo recibió. Si nos llega mucho
+# más tarde, esta PC está tan ocupada que el mouse se atrasa antes de salir a la red.
+# (El reloj de Windows avanza de a ~16 ms, así que menos de 50 no se puede medir bien.)
+ATRASO_ALTO_MS = 50
+_ESPERA_ENTRE_AVISOS_S = 15.0
 
 
-class VentanaCursorInvisible:
-    """Ventanita casi transparente con cursor vacío, para esconder la flechita local.
+class _SinInforme:
+    """Reemplazo mudo del informante cuando nadie escucha (consola, pruebas)."""
 
-    Es más segura que cambiar los cursores del sistema: si el programa se cierra
-    de golpe, la ventana desaparece sola y el cursor vuelve a verse.
-    """
-
-    def __init__(self):
-        instancia = W.kernel32.GetModuleHandleW(None)
-        self._cursor = W.user32.CreateCursor(
-            instancia, 0, 0, 32, 32, b"\xff" * (32 * 4), b"\x00" * (32 * 4)
-        )
-        clase = W.WNDCLASSW()
-        clase.lpfnWndProc = ctypes.cast(W.user32.DefWindowProcW, W.WNDPROC)
-        clase.hInstance = instancia
-        clase.hCursor = self._cursor
-        clase.lpszClassName = "MouseCompartidoCursorInvisible"
-        W.user32.RegisterClassW(ctypes.byref(clase))
-        self._hwnd = W.user32.CreateWindowExW(
-            W.WS_EX_TOPMOST | W.WS_EX_TOOLWINDOW | W.WS_EX_NOACTIVATE | W.WS_EX_LAYERED,
-            clase.lpszClassName,
-            "",
-            W.WS_POPUP,
-            0, 0, _TAM_VENTANA, _TAM_VENTANA,
-            None, None, instancia, None,
-        )
-        if not self._hwnd:
-            raise ctypes.WinError(ctypes.get_last_error())
-        # Alfa 1 de 255: a la vista no existe, pero sigue recibiendo el cursor.
-        W.user32.SetLayeredWindowAttributes(self._hwnd, 0, 1, W.LWA_ALPHA)
-
-    def mostrar(self, x, y):
-        mitad = _TAM_VENTANA // 2
-        W.user32.SetWindowPos(
-            self._hwnd, W.HWND_TOPMOST, x - mitad, y - mitad, _TAM_VENTANA, _TAM_VENTANA,
-            W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW,
-        )
-
-    def ocultar(self):
-        W.user32.ShowWindow(self._hwnd, W.SW_HIDE)
-
-    def destruir(self):
-        W.user32.DestroyWindow(self._hwnd)
-        W.user32.DestroyCursor(self._cursor)
+    def actualizar(self, **_cambios):
+        pass
 
 
 class HiloCaptura(threading.Thread):
-    def __init__(self, config, limite_remoto_s=None):
+    def __init__(self, config, informante=None, limite_remoto_s=None):
         super().__init__(name="captura", daemon=True)
         self.logica = LogicaCaptura(config, W.leer_pantallas(), self._enviar, self._pedir)
+        self.informante = informante or _SinInforme()
         self._limite_remoto_s = limite_remoto_s  # Solo se usa en el modo de prueba.
         self._conexion = None
         self._conexion_nueva = None
@@ -96,8 +64,10 @@ class HiloCaptura(threading.Thread):
         self._temporizador = None
         self._tics = 0
         self._t_remoto = 0.0
+        self._atraso_max = 0  # El peor atraso del mouse desde la última revisión (ms).
+        self._t_aviso_atraso = float("-inf")
 
-    # ---- Lo que usa el hilo de red ------------------------------------------------
+    # ---- Lo que usan los otros hilos ----------------------------------------------
     def iniciar(self):
         self.start()
         self._listo.wait()
@@ -118,6 +88,11 @@ class HiloCaptura(threading.Thread):
     def pedir_volver(self, ratio):
         self._pedir(PEDIDO_VOLVER, ratio)
 
+    def pausar(self, local=None, remota=None):
+        """Pausa (o reanuda) el paso a la otra PC. Si estabas allá, el control vuelve."""
+        self.logica.pausar(local=local, remota=remota)
+        self._pedir(PEDIDO_PAUSA)
+
     def actualizar_pantallas(self):
         """Vuelve a leer los monitores, por si conectaste o sacaste alguno."""
         self.logica.pantallas = W.leer_pantallas()
@@ -129,16 +104,22 @@ class HiloCaptura(threading.Thread):
             conexion.enviar(datos)
 
     def _pedir(self, codigo, valor=0):
-        W.user32.PostThreadMessageW(self._id_hilo, W.WM_APP + codigo, valor, 0)
+        if self._id_hilo is not None:
+            W.user32.PostThreadMessageW(self._id_hilo, W.WM_APP + codigo, valor, 0)
 
     # ---- Ganchos ------------------------------------------------------------------
     def _al_evento_mouse(self, codigo, wparam, lparam):
         if codigo == W.HC_ACTION:
             try:
                 evento = W.MSLLHOOKSTRUCT.from_address(lparam)
+                inyectado = evento.flags & W.LLMHF_INJECTED
+                if self.logica.remoto and not inyectado:
+                    # Cuánto tardó el evento en llegar hasta acá (ver ATRASO_ALTO_MS).
+                    atraso = (W.kernel32.GetTickCount() - evento.time) & 0xFFFFFFFF
+                    if self._atraso_max < atraso < 60_000:  # Más de 60 s: reloj dado vuelta.
+                        self._atraso_max = atraso
                 if self.logica.al_mouse(
-                    wparam, evento.pt.x, evento.pt.y, evento.mouseData,
-                    evento.flags & W.LLMHF_INJECTED,
+                    wparam, evento.pt.x, evento.pt.y, evento.mouseData, inyectado
                 ):
                     return 1
             except Exception as error:  # Un error acá nunca debe trabar el mouse.
@@ -172,10 +153,10 @@ class HiloCaptura(threading.Thread):
 
     # ---- Bucle de mensajes --------------------------------------------------------
     def run(self):
-        self._id_hilo = W.kernel32.GetCurrentThreadId()
         mensaje = wt.MSG()
         puntero = ctypes.byref(mensaje)
         W.user32.PeekMessageW(puntero, None, 0, 0, W.PM_NOREMOVE)  # Crea la cola del hilo.
+        self._id_hilo = W.kernel32.GetCurrentThreadId()
         try:
             self._ventana = VentanaCursorInvisible()
         except OSError as error:
@@ -219,6 +200,9 @@ class HiloCaptura(threading.Thread):
         elif codigo == PEDIDO_RESTAURAR:
             self._liberar_cursor(None)
             log("<- Control devuelto a esta PC.")
+        elif codigo == PEDIDO_PAUSA:
+            if logica.pausado and logica.remoto:
+                logica.forzar_local()  # Pide RESTAURAR, que libera el cursor.
 
     def _estacionar_cursor(self):
         """Deja el cursor local escondido y quieto en el centro del monitor."""
@@ -240,6 +224,7 @@ class HiloCaptura(threading.Thread):
         self._tics = 0
         self._t_remoto = time.perf_counter()
         log("-> Control en la otra PC. Emergencia: Ctrl+Alt+Esc")
+        self.informante.actualizar(mouse_aca=False)
 
     def _liberar_cursor(self, destino):
         self._parar_temporizador()
@@ -247,6 +232,7 @@ class HiloCaptura(threading.Thread):
             W.user32.SetCursorPos(*destino)
         if self._ventana:
             self._ventana.ocultar()
+        self.informante.actualizar(mouse_aca=True)
 
     def _parar_temporizador(self):
         if self._temporizador:
@@ -264,6 +250,7 @@ class HiloCaptura(threading.Thread):
         if self._tics < _TICS_POR_VIGILANCIA:
             return
         self._tics = 0
+        self._revisar_atraso()
         self._vigilar_gancho()
         if (
             self._limite_remoto_s is not None
@@ -272,6 +259,15 @@ class HiloCaptura(threading.Thread):
         ):
             log("Modo prueba: se acabó el tiempo, devolviendo el control.")
             logica.forzar_local()
+
+    def _revisar_atraso(self):
+        """Avisa (como mucho cada 15 s) si el mouse se atrasó dentro de esta PC."""
+        atraso, self._atraso_max = self._atraso_max, 0
+        ahora = time.perf_counter()
+        if atraso >= ATRASO_ALTO_MS and ahora - self._t_aviso_atraso >= _ESPERA_ENTRE_AVISOS_S:
+            self._t_aviso_atraso = ahora
+            log(f"Ojo: el mouse se atrasó {atraso} ms dentro de esta PC, antes de salir a la "
+                "red. Algún programa la tiene muy ocupada (mirá el Administrador de tareas).")
 
     def _vigilar_gancho(self):
         """Si el cursor se movió estando estacionado, Windows nos quitó el gancho.

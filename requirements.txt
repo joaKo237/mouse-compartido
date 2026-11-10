@@ -1,0 +1,3 @@
+# Solo la interfaz gráfica necesita algo extra. El motor (mouse y teclado) usa solo Python.
+# "Essentials" es la parte básica de Qt: pesa mucho menos que el paquete PySide6 completo.
+PySide6-Essentials>=6.7,<7

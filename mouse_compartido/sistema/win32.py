@@ -9,7 +9,7 @@ import gc
 import sys
 from ctypes import wintypes as wt
 
-from .pantallas import Monitor, Pantallas
+from ..comun.pantallas import Monitor, Pantallas
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -56,6 +56,7 @@ LLKHF_UP = 0x80
 VK_PAUSE = 0x13
 VK_ESCAPE = 0x1B
 VK_NUMLOCK = 0x90
+VK_RSHIFT = 0xA1
 VK_LCONTROL = 0xA2
 VK_RCONTROL = 0xA3
 VK_LMENU = 0xA4
@@ -207,6 +208,8 @@ user32.GetCursorPos.argtypes = (ctypes.POINTER(wt.POINT),)
 user32.GetCursorPos.restype = wt.BOOL
 user32.SendInput.argtypes = (wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.SendInput.restype = wt.UINT
+user32.MapVirtualKeyW.argtypes = (wt.UINT, wt.UINT)
+user32.MapVirtualKeyW.restype = wt.UINT
 
 user32.EnumDisplayMonitors.argtypes = (wt.HDC, ctypes.POINTER(wt.RECT), MONITORENUMPROC, wt.LPARAM)
 user32.EnumDisplayMonitors.restype = wt.BOOL
@@ -238,6 +241,8 @@ user32.CreateCursor.argtypes = (
 user32.CreateCursor.restype = HCURSOR
 user32.DestroyCursor.argtypes = (HCURSOR,)
 user32.DestroyCursor.restype = wt.BOOL
+user32.IsWindowVisible.argtypes = (wt.HWND,)
+user32.IsWindowVisible.restype = wt.BOOL
 
 user32.SetProcessDpiAwarenessContext.argtypes = (ctypes.c_void_p,)
 user32.SetProcessDpiAwarenessContext.restype = wt.BOOL
@@ -255,7 +260,14 @@ kernel32.GetConsoleMode.argtypes = (wt.HANDLE, ctypes.POINTER(wt.DWORD))
 kernel32.GetConsoleMode.restype = wt.BOOL
 kernel32.SetConsoleMode.argtypes = (wt.HANDLE, wt.DWORD)
 kernel32.SetConsoleMode.restype = wt.BOOL
+kernel32.SetProcessInformation.argtypes = (wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD)
+kernel32.SetProcessInformation.restype = wt.BOOL
+kernel32.GetTickCount.restype = wt.DWORD
 shell32.IsUserAnAdmin.restype = wt.BOOL
+
+
+class _ESTADO_AHORRO(ctypes.Structure):  # PROCESS_POWER_THROTTLING_STATE
+    _fields_ = [("Version", wt.ULONG), ("ControlMask", wt.ULONG), ("StateMask", wt.ULONG)]
 
 
 # --- Ayudantes -----------------------------------------------------------------
@@ -264,6 +276,30 @@ _PRIORIDAD_ALTA = 0x00000080
 _STD_INPUT = -10 & 0xFFFFFFFF
 _QUICK_EDIT = 0x0040
 _EXTENDED_FLAGS = 0x0080
+_INFO_AHORRO_ENERGIA = 4  # ProcessPowerThrottling
+_AHORRO_VELOCIDAD = 0x1  # PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+_AHORRO_RELOJ = 0x4  # PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION (Windows 11)
+
+
+def desactivar_modo_eficiencia():
+    """Le pide a Windows que no frene este programa para ahorrar energía.
+
+    Windows 11 pone en "modo eficiencia" a los programas que no tienen una
+    ventana a la vista (el motor no tiene ninguna, y una consola minimizada
+    tampoco cuenta): les baja la velocidad del procesador y agranda sus pausas.
+    Para algo que mueve el mouse eso se siente como un cursor lento o a los saltos.
+    Devuelve True si Windows aceptó el pedido.
+    """
+    proceso = kernel32.GetCurrentProcess()
+    # Primero las dos cosas; Windows 10 no conoce la segunda, y ahí va solo la primera.
+    for mascara in (_AHORRO_VELOCIDAD | _AHORRO_RELOJ, _AHORRO_VELOCIDAD):
+        # Mascara de control encendida y estado en 0 = "nunca frenar esto".
+        estado = _ESTADO_AHORRO(1, mascara, 0)
+        if kernel32.SetProcessInformation(
+            proceso, _INFO_AHORRO_ENERGIA, ctypes.byref(estado), ctypes.sizeof(estado)
+        ):
+            return True
+    return False
 
 
 def _desactivar_quick_edit():
@@ -282,6 +318,8 @@ def preparar_proceso():
         user32.SetProcessDPIAware()
     # Que otros programas pesados no le quiten el turno.
     kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), _PRIORIDAD_ALTA)
+    # Y que Windows no lo frene para ahorrar batería.
+    desactivar_modo_eficiencia()
     # Si otro hilo de Python está corriendo, ceder el turno cada 1 ms en lugar de 5 ms.
     sys.setswitchinterval(0.001)
     # Evitar pausas largas del recolector de basura.
@@ -314,21 +352,52 @@ def posicion_cursor():
     return punto.x, punto.y
 
 
+_MAPVK_VSC_A_VK_EX = 3
+_escaneos_conocidos = {}
+
+
+def _escaneo_existe(escaneo, extendida):
+    """¿El teclado configurado en esta PC tiene una tecla con ese código de escaneo?
+
+    Se guarda la respuesta: son pocas teclas y así no se le pregunta a Windows
+    en cada pulsación.
+    """
+    clave = (escaneo, extendida)
+    existe = _escaneos_conocidos.get(clave)
+    if existe is None:
+        codigo = escaneo | (0xE000 if extendida else 0)
+        existe = user32.MapVirtualKeyW(codigo, _MAPVK_VSC_A_VK_EX) != 0
+        _escaneos_conocidos[clave] = existe
+    return existe
+
+
+def armar_tecla(vk, escaneo, extendida, soltada, existe=_escaneo_existe):
+    """Decide cómo simular una tecla. Devuelve (tecla virtual, escaneo, banderas) para SendInput.
+
+    Lo normal es mandar el código de escaneo: representa la tecla física, así que
+    la distribución de teclado de la PC de destino decide qué letra sale.
+    """
+    if vk == VK_RSHIFT:
+        # Windows le pone la marca de "tecla extendida" al Shift derecho cuando lo
+        # captura, pero la tecla real no la lleva. Mandado con la marca, la otra PC
+        # recibe una tecla inexistente: el Shift derecho no anda y algunos juegos
+        # se cierran con "Subscript out of range".
+        extendida = False
+    banderas = (KEYEVENTF_EXTENDEDKEY if extendida else 0) | (KEYEVENTF_KEYUP if soltada else 0)
+    if (
+        escaneo == 0
+        or vk in (VK_PAUSE, VK_NUMLOCK)
+        or 0xA6 <= vk <= 0xB7  # Multimedia y navegador.
+        or not existe(escaneo, extendida)  # Ese teclado no tiene la tecla: mejor por nombre.
+    ):
+        return vk, 0, banderas
+    return 0, escaneo, banderas | KEYEVENTF_SCANCODE
+
+
 def enviar_tecla(vk, escaneo, extendida, soltada):
-    """Simula una tecla. Usa código de escaneo salvo en las teclas que no lo soportan bien."""
+    """Simula una tecla en esta PC."""
     entrada = INPUT(type=INPUT_KEYBOARD)
-    banderas = 0
-    if extendida:
-        banderas |= KEYEVENTF_EXTENDEDKEY
-    if soltada:
-        banderas |= KEYEVENTF_KEYUP
-    if escaneo == 0 or vk in (VK_PAUSE, VK_NUMLOCK) or 0xA6 <= vk <= 0xB7:
-        # Pausa, Bloq Num, multimedia y navegador: se mandan por tecla virtual.
-        entrada.ki.wVk = vk
-    else:
-        # El código de escaneo representa la tecla física, así que la distribución
-        # de teclado de la PC de destino decide qué letra sale.
-        entrada.ki.wScan = escaneo
-        banderas |= KEYEVENTF_SCANCODE
-    entrada.ki.dwFlags = banderas
+    entrada.ki.wVk, entrada.ki.wScan, entrada.ki.dwFlags = armar_tecla(
+        vk, escaneo, extendida, soltada
+    )
     user32.SendInput(1, ctypes.byref(entrada), TAMANIO_INPUT)

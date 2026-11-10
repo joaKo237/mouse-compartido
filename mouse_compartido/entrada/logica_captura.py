@@ -7,9 +7,8 @@ Regla de oro: cada evento se resuelve en microsegundos y sin esperar a nadie.
 
 from time import perf_counter
 
-from . import protocolo as P
-from . import win32 as W
-from .pantallas import DERECHA, MARGEN_ENTRADA
+from ..red import protocolo as P
+from ..sistema import win32 as W
 
 # Pedidos al bucle de mensajes: las llamadas a Windows que mueven cosas se hacen
 # ahí y no dentro del gancho, para no anidar eventos.
@@ -18,6 +17,7 @@ PEDIDO_DESCONECTADO = 2
 PEDIDO_ESTACIONAR = 3
 PEDIDO_VOLVER = 4
 PEDIDO_RESTAURAR = 5
+PEDIDO_PAUSA = 6
 
 _CTRL = {W.VK_LCONTROL, W.VK_RCONTROL}
 _ALT = {W.VK_LMENU, W.VK_RMENU}
@@ -67,6 +67,11 @@ class LogicaCaptura:
 
         self.conectado = False
         self.remoto = False  # True mientras se controla la otra PC.
+        # Pausa: la conexión sigue, pero no se pasa a la otra PC. Puede pedirla
+        # esta PC (desde la bandeja) o la otra (y llega por la red).
+        self.pausa_local = False
+        self.pausa_remota = False
+        self.pausado = False
         self.ref_x = 0  # Punto contra el que se miden los movimientos.
         self.ref_y = 0
         self.acumulado_x = 0
@@ -92,7 +97,13 @@ class LogicaCaptura:
         if mensaje == W.WM_MOUSEMOVE:
             # No se cruza con un botón apretado: si estás arrastrando algo, la
             # soltada tiene que ocurrir en esta misma PC.
-            if self.conectado and not self.botones_locales and self._toca_borde(x, y):
+            if (
+                self.conectado
+                and not self.pausado
+                and not self.botones_locales
+                and self.pantallas.toca_borde(self.lado, x, y, self.margen_esquinas)
+                and self.reloj() >= self.no_cruzar_hasta
+            ):
                 self._cruzar(x, y)
                 return True
             return False
@@ -105,25 +116,13 @@ class LogicaCaptura:
                 self.botones_locales.discard(codigo)
         return False
 
-    def _toca_borde(self, x, y):
-        pantallas = self.pantallas
-        if self.lado == DERECHA:
-            if x < pantallas.der - 1:
-                return False
-        elif x > pantallas.izq:
-            return False
-        if self.reloj() < self.no_cruzar_hasta:
-            return False
-        arriba, abajo = pantallas.rango_borde(self.lado)
-        return arriba + self.margen_esquinas <= y < abajo - self.margen_esquinas
-
     def _cruzar(self, x, y):
         self.remoto = True
         self.ref_x = x
         self.ref_y = y
         self.acumulado_x = self.acumulado_y = 0
         self.t_estacionado = 0.0
-        self.enviar(P.entrar(self.pantallas.ratio_en_borde(self.lado, y)))
+        self.enviar(P.entrar(self.pantallas.ratio_en_borde(self.lado, x, y)))
         # Las teclas que venías apretando (por ejemplo Ctrl) siguen apretadas allá.
         for vk, (escaneo, banderas) in self.teclas_locales.items():
             self.enviar(P.tecla(vk, escaneo, banderas))
@@ -242,11 +241,19 @@ class LogicaCaptura:
         if not self.remoto:
             return None
         self._dejar_remoto()
-        pantallas = self.pantallas
-        y = pantallas.y_desde_ratio(self.lado, ratio)
-        if self.lado == DERECHA:
-            return pantallas.der - 1 - MARGEN_ENTRADA, y
-        return pantallas.izq + MARGEN_ENTRADA, y
+        return self.pantallas.punto_en_borde(self.lado, ratio)
+
+    def pausar(self, local=None, remota=None):
+        """Cambia la pausa. Se puede llamar desde cualquier hilo: solo anota.
+
+        Si en ese momento se está controlando la otra PC, quien llama tiene que
+        pedir al hilo de los ganchos que devuelva el control (ver captura.py).
+        """
+        if local is not None:
+            self.pausa_local = bool(local)
+        if remota is not None:
+            self.pausa_remota = bool(remota)
+        self.pausado = self.pausa_local or self.pausa_remota
 
     def al_desconectar(self):
         """Se cortó la conexión. Devuelve True si estaba controlando la otra PC."""
@@ -255,4 +262,5 @@ class LogicaCaptura:
         if estaba_remoto:
             self._dejar_remoto()
         self.botones_locales.clear()
+        self.pausar(remota=False)  # La pausa de la otra PC era de esa conexión.
         return estaba_remoto

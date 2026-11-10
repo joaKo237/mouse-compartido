@@ -1,18 +1,19 @@
 """Servidor y cliente completos hablando por red real (127.0.0.1), sin tocar el mouse."""
 
+import socket
 import statistics
 import threading
 import time
 import unittest
 from dataclasses import replace
 
-from mouse_compartido import win32 as W
-from mouse_compartido.cliente import Cliente
-from mouse_compartido.config import Config
-from mouse_compartido.inyeccion import SalidaSimulada
-from mouse_compartido.logica_captura import PEDIDO_ESTACIONAR, LogicaCaptura
-from mouse_compartido.pantallas import Monitor, Pantallas
-from mouse_compartido.servidor import Servidor
+from mouse_compartido.sistema import win32 as W
+from mouse_compartido.motor.cliente import Cliente
+from mouse_compartido.comun.config import Config
+from mouse_compartido.entrada.inyeccion import SalidaSimulada
+from mouse_compartido.entrada.logica_captura import PEDIDO_ESTACIONAR, LogicaCaptura
+from mouse_compartido.comun.pantallas import Monitor, Pantallas
+from mouse_compartido.motor.servidor import Servidor
 
 PUERTO = 24999
 CONFIG = Config(
@@ -59,6 +60,11 @@ class CapturaFalsa:
     def pedir_volver(self, ratio):
         self.logica.al_volver(ratio)
         self.volvio.set()
+
+    def pausar(self, local=None, remota=None):
+        self.logica.pausar(local=local, remota=remota)
+        if self.logica.pausado and self.logica.remoto:
+            self.logica.forzar_local()
 
     def actualizar_pantallas(self):
         pass
@@ -179,6 +185,64 @@ class IntegracionTest(unittest.TestCase):
         self.assertTrue(self.captura.conectado.wait(5))
         time.sleep(2.6)  # Más que el tiempo sin respuesta: la sesión debe seguir viva.
         self.assertFalse(self.captura.desconectado.is_set())
+
+    def test_cada_pc_conoce_el_nombre_y_los_monitores_de_la_otra(self):
+        self.arrancar()
+        self.assertTrue(self.captura.conectado.wait(5))
+        nombre = socket.gethostname()
+
+        def otra(informante):
+            return informante.leer("otra_pc") or {}
+
+        self.assertTrue(esperar(lambda: otra(self.servidor.informante).get("nombre") == nombre))
+        self.assertEqual(otra(self.servidor.informante)["monitores"], [[0, 0, 1366, 768]])
+        self.assertTrue(esperar(lambda: otra(self.cliente.informante).get("nombre") == nombre))
+        self.assertEqual(otra(self.cliente.informante)["monitores"], [[0, 0, 1920, 1080]])
+        self.assertEqual(self.cliente.informante.leer("lado"), "izquierda")
+
+    def test_la_pausa_del_cliente_devuelve_el_control_y_frena_el_cruce(self):
+        self.arrancar()
+        self.assertTrue(self.captura.conectado.wait(5))
+        logica = self.captura.logica
+        self.assertTrue(logica.al_mouse(W.WM_MOUSEMOVE, 1919, 540, 0, 0))
+        self.assertTrue(self.salida.movida.wait(2))
+
+        self.cliente.pausar(True)
+        self.assertTrue(esperar(lambda: not logica.remoto))
+        self.assertTrue(esperar(lambda: self.salida.cursor_escondido))
+        self.assertTrue(esperar(lambda: self.servidor.informante.leer("pausa_otra")))
+        self.assertFalse(logica.al_mouse(W.WM_MOUSEMOVE, 1919, 540, 0, 0))
+
+        self.cliente.pausar(False)
+        self.assertTrue(esperar(lambda: not logica.pausado))
+        self.assertTrue(logica.al_mouse(W.WM_MOUSEMOVE, 1919, 540, 0, 0))
+
+    def test_al_volver_la_otra_pc_esconde_su_cursor(self):
+        self.arrancar()
+        self.assertTrue(self.captura.conectado.wait(5))
+        logica = self.captura.logica
+        logica.al_mouse(W.WM_MOUSEMOVE, 1919, 540, 0, 0)
+        self.assertTrue(self.salida.movida.wait(2))
+        self.assertTrue(esperar(lambda: self.cliente.informante.leer("mouse_aca")))
+        self.assertFalse(self.salida.cursor_escondido)
+        time.sleep(0.15)  # Pasado el filtro de saltos que sigue al cruce.
+        logica.al_mouse(W.WM_MOUSEMOVE, 960 - 3000, 540, 0, 0)
+        self.assertTrue(self.captura.volvio.wait(2))
+        self.assertTrue(self.salida.cursor_escondido)
+        self.assertFalse(self.cliente.informante.leer("mouse_aca"))
+
+    def test_al_cortarse_la_otra_pc_muestra_su_cursor(self):
+        self.arrancar()
+        self.assertTrue(self.captura.conectado.wait(5))
+        logica = self.captura.logica
+        logica.al_mouse(W.WM_MOUSEMOVE, 1919, 540, 0, 0)
+        self.assertTrue(self.salida.movida.wait(2))
+        time.sleep(0.15)  # Pasado el filtro de saltos que sigue al cruce.
+        logica.al_mouse(W.WM_MOUSEMOVE, 960 - 3000, 540, 0, 0)
+        self.assertTrue(self.captura.volvio.wait(2))
+        self.assertTrue(esperar(lambda: self.salida.cursor_escondido))
+        self.servidor.detener()
+        self.assertTrue(esperar(lambda: not self.salida.cursor_escondido, 5))
 
 
 if __name__ == "__main__":

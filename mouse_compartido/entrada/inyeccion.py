@@ -3,10 +3,11 @@
 import ctypes
 import time
 
-from . import protocolo as P
-from . import win32 as W
-from .pantallas import Monitor, Pantallas
-from .registro import log
+from ..comun.pantallas import Monitor, Pantallas
+from ..comun.registro import log
+from ..red import protocolo as P
+from ..sistema import win32 as W
+from .cursor import HiloCursorEscondido
 
 _BOTONES = {
     P.BOTON_IZQUIERDO: (W.MOUSEEVENTF_LEFTDOWN, W.MOUSEEVENTF_LEFTUP, 0),
@@ -38,6 +39,19 @@ class SalidaWindows:
             W.MOUSEEVENTF_MOVE | W.MOUSEEVENTF_ABSOLUTE | W.MOUSEEVENTF_VIRTUALDESK
         )
         self._puntero_mover = ctypes.byref(self._entrada_mover)
+        self._cursor = HiloCursorEscondido()
+        self._cursor.iniciar()
+
+    def cerrar(self):
+        """Saca la ventanita del cursor. Se llama al cerrar el cliente."""
+        self._cursor.mostrar()
+        self._cursor.detener()
+
+    def esconder_cursor(self, x, y):
+        self._cursor.esconder(x, y)
+
+    def mostrar_cursor(self):
+        self._cursor.mostrar()
 
     def pantallas(self):
         self._pantallas = W.leer_pantallas()
@@ -85,6 +99,18 @@ class SalidaSimulada:
         self.x = 0
         self.y = 0
         self._t_aviso = 0.0
+        self.cursor_escondido = False
+
+    def cerrar(self):
+        pass
+
+    def esconder_cursor(self, x, y):
+        self.cursor_escondido = True
+        if self._mostrar:
+            log(f"   [simulado] cursor escondido en ({x}, {y})")
+
+    def mostrar_cursor(self):
+        self.cursor_escondido = False
 
     def pantallas(self):
         return self._pantallas

@@ -1,5 +1,7 @@
 # Guarda el PIN: nunca debe subirse.
 config.json
+# Archivo temporal que se usa al guardar la configuración.
+*.tmp
 
 __pycache__/
 *.pyc

@@ -1,5 +1,9 @@
 """Menú de consola y arranque de cada modo.
 
+Es la forma "de texto" de usar el programa, la de la primera versión. La forma
+normal ahora es la interfaz gráfica, pero esto sigue andando igual (sirve para
+diagnosticar problemas sin ventanas de por medio).
+
 Para agregar una opción nueva alcanza con sumar una línea a la lista OPCIONES.
 """
 
@@ -7,14 +11,14 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Callable
 
-from . import config as modulo_config
-from . import win32 as W
-from .captura import HiloCaptura
+from ..comun import config as modulo_config
+from ..comun.pantallas import LADOS
+from ..comun.registro import log
+from ..entrada.captura import HiloCaptura
+from ..entrada.inyeccion import SalidaSimulada
+from ..red.conexion import ips_locales
+from ..sistema import win32 as W
 from .cliente import Cliente
-from .conexion import ips_locales
-from .inyeccion import SalidaSimulada
-from .pantallas import DERECHA, IZQUIERDA
-from .registro import log
 from .servidor import Servidor
 
 
@@ -59,7 +63,7 @@ def correr_prueba(config):
     """Prueba en una sola PC: captura real, cliente simulado que solo muestra los eventos."""
     config = replace(config, pin="prueba-local", ip_servidor="127.0.0.1")
     log("MODO PRUEBA: lo que hagas en la 'otra PC' se muestra acá y no se ejecuta.")
-    log(f"Llevá el cursor al borde de la {config.lado_otra_pantalla}. Ctrl+Alt+Esc lo devuelve. "
+    log(f"Llevá el cursor al borde ({config.lado_otra_pantalla}). Ctrl+Alt+Esc lo devuelve. "
         "Por seguridad, a los 30 segundos vuelve solo.")
     cliente = Cliente(config, salida=SalidaSimulada())
     servidor = Servidor(config, captura=HiloCaptura(config, limite_remoto_s=30.0))
@@ -98,13 +102,13 @@ def _configurar(config):
     )
     while True:
         lado = _preguntar(
-            "Lado de la otra pantalla (solo en el servidor: izquierda/derecha)",
+            "Lado de la otra pantalla (solo en el servidor: izquierda/derecha/arriba/abajo)",
             config.lado_otra_pantalla,
         ).lower()
-        if lado in (IZQUIERDA, DERECHA):
+        if lado in LADOS:
             config.lado_otra_pantalla = lado
             break
-        print('  Escribí "izquierda" o "derecha".')
+        print('  Escribí "izquierda", "derecha", "arriba" o "abajo".')
     modulo_config.guardar(config)
     print("  Guardado en config.json")
 

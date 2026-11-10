@@ -6,8 +6,7 @@ exactitud sus pantallas. El servidor solo manda cuánto se movió el mouse.
 
 from time import perf_counter
 
-from . import protocolo as P
-from .pantallas import IZQUIERDA, MARGEN_ENTRADA
+from ..red import protocolo as P
 
 _RESINCRONIZAR_TRAS_S = 0.25
 
@@ -31,13 +30,10 @@ class LogicaCliente:
     def entrar(self, ratio):
         """El cursor llega desde el servidor."""
         self.pantallas = pantallas = self.salida.pantallas()
-        y = pantallas.y_desde_ratio(self.lado, ratio)
-        x = (
-            pantallas.izq + MARGEN_ENTRADA
-            if self.lado == IZQUIERDA
-            else pantallas.der - 1 - MARGEN_ENTRADA
-        )
-        self.x, self.y = pantallas.limitar(x, y)
+        # Primero se saca la ventanita que esconde el cursor: si no, los clicks
+        # que lleguen caerían sobre ella.
+        self.salida.mostrar_cursor()
+        self.x, self.y = pantallas.punto_en_borde(self.lado, ratio)
         self.salida.mover_a(self.x, self.y)
         self.activo = True
         ahora = self.reloj()
@@ -54,19 +50,36 @@ class LogicaCliente:
         self.t_movimiento = ahora
         nueva_x = self.x + dx
         nueva_y = self.y + dy
-        if self._cruza_borde(nueva_x) and not self.botones and ahora >= self.no_volver_hasta:
-            ratio = self.pantallas.ratio_en_borde(self.lado, nueva_y)
+        pantallas = self.pantallas
+        if (
+            pantallas.sale_por(self.lado, nueva_x, nueva_y)
+            and not self.botones
+            and ahora >= self.no_volver_hasta
+        ):
+            ratio = pantallas.ratio_en_borde(self.lado, nueva_x, nueva_y)
             self.soltar_todo()
             self.activo = False
             self.enviar(P.volver(ratio))
+            # El cursor queda quieto en el borde: se esconde, como en la PC principal.
+            self.salida.esconder_cursor(self.x, self.y)
             return
-        self.x, self.y = self.pantallas.limitar(nueva_x, nueva_y)
+        self.x, self.y = pantallas.limitar(nueva_x, nueva_y)
         self.salida.mover_a(self.x, self.y)
 
-    def _cruza_borde(self, x):
-        if self.lado == IZQUIERDA:
-            return x < self.pantallas.izq
-        return x >= self.pantallas.der
+    def actualizar_pantallas(self):
+        """Vuelve a leer los monitores. Devuelve True si cambiaron.
+
+        Un juego en pantalla completa puede cambiar la resolución. Con las medidas
+        viejas, el cursor no llegaría a todos lados ni encontraría el borde de regreso.
+        """
+        nuevas = self.salida.pantallas()
+        if nuevas.como_lista() == self.pantallas.como_lista():
+            return False
+        self.pantallas = nuevas
+        if self.activo:
+            # Windows ya acomodó el cursor en la pantalla nueva: se parte de ahí.
+            self.x, self.y = nuevas.limitar(*self.salida.posicion_real())
+        return True
 
     def boton(self, codigo, apretado):
         if not self.activo:
@@ -91,9 +104,18 @@ class LogicaCliente:
         self.salida.tecla(vk, escaneo, banderas)
 
     def salir(self):
-        """El servidor recuperó el control."""
+        """El servidor recuperó el control (atajo de emergencia o pausa)."""
+        estaba_activo = self.activo
         self.soltar_todo()
         self.activo = False
+        if estaba_activo:
+            self.salida.esconder_cursor(self.x, self.y)
+
+    def terminar(self):
+        """Se cortó la conexión: se suelta todo y el cursor vuelve a verse."""
+        self.soltar_todo()
+        self.activo = False
+        self.salida.mostrar_cursor()
 
     def soltar_todo(self):
         """Suelta todo lo apretado. Sin esto podría quedar una tecla trabada."""

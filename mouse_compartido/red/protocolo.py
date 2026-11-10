@@ -12,9 +12,12 @@ Como cada marco dice cuánto mide, un programa viejo puede saltear mensajes que
 no conoce: eso permite agregar funciones sin romper lo que ya anda.
 """
 
+import json
 import struct
 
-VERSION = 1
+# Versión 2: bordes arriba/abajo, pausa e información de cada PC. Las dos PCs
+# tienen que correr la misma versión (si no, el saludo lo avisa).
+VERSION = 2
 MAGIA = b"MCOM"  # Primeros bytes del saludo: confirman que hablamos con este programa.
 
 # Canales: cada conexión TCP declara para qué se usa al saludar.
@@ -40,6 +43,8 @@ class Tipo:
     ENTRAR = 12  # Servidor -> cliente: el cursor entra en tu pantalla.
     VOLVER = 13  # Cliente -> servidor: el cursor cruzó el borde de regreso.
     SALIR = 14  # Servidor -> cliente: el control volvió, soltá todo.
+    PAUSA = 15  # En los dos sentidos: "puse en pausa" (1) o "reanudé" (0).
+    INFO = 16  # En los dos sentidos, al conectar: nombre de la PC y sus monitores (JSON).
 
     # Mouse y teclado.
     MOVER = 20
@@ -142,6 +147,24 @@ def ping(tiempo_ns):
 
 def pong(tiempo_ns):
     return _M_TIEMPO.pack(9, Tipo.PONG, tiempo_ns)
+
+
+def pausa(activa):
+    return marco(Tipo.PAUSA, b"\x01" if activa else b"\x00")
+
+
+def info(nombre, monitores):
+    """Presentación de cada PC: se manda una vez, justo después del saludo."""
+    return marco(Tipo.INFO, json.dumps({"nombre": nombre, "monitores": monitores}).encode("utf-8"))
+
+
+def leer_info(cuerpo):
+    """Devuelve (nombre, monitores) o None si el mensaje no se entiende."""
+    try:
+        datos = json.loads(bytes(cuerpo).decode("utf-8"))
+        return str(datos.get("nombre", ""))[:64], list(datos.get("monitores", []))[:16]
+    except (ValueError, AttributeError, TypeError):
+        return None
 
 
 class LectorMarcos:

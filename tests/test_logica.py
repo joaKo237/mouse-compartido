@@ -2,17 +2,25 @@
 
 import unittest
 
-from mouse_compartido import protocolo as P
-from mouse_compartido import win32 as W
-from mouse_compartido.config import Config
-from mouse_compartido.inyeccion import a_coordenada_normalizada
-from mouse_compartido.logica_captura import (
+from mouse_compartido.comun.config import Config
+from mouse_compartido.comun.pantallas import (
+    ABAJO,
+    ARRIBA,
+    DERECHA,
+    IZQUIERDA,
+    Monitor,
+    Pantallas,
+    desde_lista,
+)
+from mouse_compartido.entrada.inyeccion import a_coordenada_normalizada
+from mouse_compartido.entrada.logica_captura import (
     LogicaCaptura,
     PEDIDO_ESTACIONAR,
     PEDIDO_RESTAURAR,
 )
-from mouse_compartido.logica_cliente import LogicaCliente
-from mouse_compartido.pantallas import DERECHA, IZQUIERDA, Monitor, Pantallas
+from mouse_compartido.entrada.logica_cliente import LogicaCliente
+from mouse_compartido.red import protocolo as P
+from mouse_compartido.sistema import win32 as W
 
 FHD = Pantallas([Monitor(0, 0, 1920, 1080)])
 MOVER = W.WM_MOUSEMOVE
@@ -32,13 +40,40 @@ class Reloj:
 class PantallasTest(unittest.TestCase):
     def test_altura_se_conserva_entre_resoluciones(self):
         chica = Pantallas([Monitor(0, 0, 1366, 768)])
-        ratio = FHD.ratio_en_borde(DERECHA, 540)
-        self.assertAlmostEqual(chica.y_desde_ratio(IZQUIERDA, ratio), 384, delta=1)
+        ratio = FHD.ratio_en_borde(DERECHA, 1919, 540)
+        self.assertAlmostEqual(chica.posicion_desde_ratio(IZQUIERDA, ratio), 384, delta=1)
 
     def test_extremos(self):
-        self.assertEqual(FHD.y_desde_ratio(DERECHA, 0), 0)
-        self.assertEqual(FHD.y_desde_ratio(DERECHA, 65535), 1079)
-        self.assertEqual(FHD.ratio_en_borde(DERECHA, 1079), 65535)
+        self.assertEqual(FHD.posicion_desde_ratio(DERECHA, 0), 0)
+        self.assertEqual(FHD.posicion_desde_ratio(DERECHA, 65535), 1079)
+        self.assertEqual(FHD.ratio_en_borde(DERECHA, 1919, 1079), 65535)
+
+    def test_arriba_y_abajo_usan_la_posicion_horizontal(self):
+        chica = Pantallas([Monitor(0, 0, 1366, 768)])
+        ratio = FHD.ratio_en_borde(ABAJO, 960, 1079)
+        self.assertAlmostEqual(chica.posicion_desde_ratio(ARRIBA, ratio), 683, delta=1)
+        self.assertEqual(FHD.rango_borde(ARRIBA), (0, 1920))
+
+    def test_punto_de_entrada_en_cada_borde(self):
+        self.assertEqual(FHD.punto_en_borde(IZQUIERDA, 0), (2, 0))
+        self.assertEqual(FHD.punto_en_borde(DERECHA, 65535), (1917, 1079))
+        self.assertEqual(FHD.punto_en_borde(ARRIBA, 65535), (1919, 2))
+        self.assertEqual(FHD.punto_en_borde(ABAJO, 0), (0, 1077))
+
+    def test_toca_y_sale_por_cada_borde(self):
+        self.assertTrue(FHD.toca_borde(ARRIBA, 900, 0))
+        self.assertFalse(FHD.toca_borde(ARRIBA, 900, 1))
+        self.assertTrue(FHD.toca_borde(ABAJO, 900, 1079))
+        self.assertFalse(FHD.toca_borde(ABAJO, 10, 1079, margen=20))
+        self.assertTrue(FHD.sale_por(ARRIBA, 900, -1))
+        self.assertTrue(FHD.sale_por(ABAJO, 900, 1080))
+        self.assertFalse(FHD.sale_por(ABAJO, 900, 1079))
+
+    def test_lista_ida_y_vuelta(self):
+        p = Pantallas([Monitor(-1920, 0, 0, 1080), Monitor(0, 0, 2560, 1440)])
+        self.assertEqual(desde_lista(p.como_lista()).monitores, p.monitores)
+        self.assertIsNone(desde_lista([["a"]]))
+        self.assertIsNone(desde_lista([]))
 
     def test_varios_monitores_con_coordenadas_negativas(self):
         p = Pantallas([Monitor(-1920, 0, 0, 1080), Monitor(0, 0, 2560, 1440)])
@@ -254,6 +289,24 @@ class CapturaTest(CapturaBase):
         self.assertFalse(self.logica.remoto)
         self.assertFalse(self.logica.al_mouse(MOVER, 1919, 540, 0, 0))
 
+    def test_en_pausa_no_cruza(self):
+        self.logica.pausar(local=True)
+        self.assertFalse(self.logica.al_mouse(MOVER, 1919, 540, 0, 0))
+        self.logica.pausar(local=False)
+        self.assertTrue(self.logica.al_mouse(MOVER, 1919, 540, 0, 0))
+
+    def test_pausa_de_la_otra_pc_tambien_frena(self):
+        self.logica.pausar(remota=True)
+        self.assertFalse(self.logica.al_mouse(MOVER, 1919, 540, 0, 0))
+        self.logica.pausar(local=True)
+        self.logica.pausar(remota=False)
+        self.assertTrue(self.logica.pausado, "La pausa local sigue aunque la otra reanude")
+
+    def test_la_pausa_de_la_otra_pc_se_olvida_al_desconectar(self):
+        self.logica.pausar(remota=True)
+        self.logica.al_desconectar()
+        self.assertFalse(self.logica.pausado)
+
 
 class CapturaIzquierdaTest(CapturaBase):
     lado = IZQUIERDA
@@ -267,6 +320,31 @@ class CapturaIzquierdaTest(CapturaBase):
         self.assertEqual(self.logica.al_volver(0), (2, 0))
 
 
+class CapturaArribaTest(CapturaBase):
+    lado = ARRIBA
+
+    def test_cruza_por_arriba_y_no_por_los_costados(self):
+        self.assertFalse(self.logica.al_mouse(MOVER, 1919, 540, 0, 0))
+        self.assertFalse(self.logica.al_mouse(MOVER, 5, 0, 0, 0))  # Esquina muerta.
+        self.assertTrue(self.logica.al_mouse(MOVER, 960, 0, 0, 0))
+        marco = self.recibidos()[0]
+        self.assertEqual(marco[0], P.Tipo.ENTRAR)
+        self.assertAlmostEqual(P.S_RATIO.unpack(marco[1])[0], 32784, delta=40)
+
+    def test_vuelve_arriba(self):
+        self.logica.al_mouse(MOVER, 960, 0, 0, 0)
+        self.assertEqual(self.logica.al_volver(65535), (1919, 2))
+
+
+class CapturaAbajoTest(CapturaBase):
+    lado = ABAJO
+
+    def test_cruza_por_abajo(self):
+        self.assertFalse(self.logica.al_mouse(MOVER, 960, 1078, 0, 0))
+        self.assertTrue(self.logica.al_mouse(MOVER, 960, 1079, 0, 0))
+        self.assertEqual(self.logica.al_volver(0), (0, 1077))
+
+
 class SalidaFalsa:
     def __init__(self, monitores=None):
         self._p = Pantallas(monitores or [Monitor(0, 0, 1920, 1080)])
@@ -274,6 +352,16 @@ class SalidaFalsa:
         self.botones = []
         self.teclas = []
         self.ruedas = []
+        self.cursor = []  # Historial: ("esconder", x, y) o ("mostrar",)
+
+    def esconder_cursor(self, x, y):
+        self.cursor.append(("esconder", x, y))
+
+    def mostrar_cursor(self):
+        self.cursor.append(("mostrar",))
+
+    def cerrar(self):
+        pass
 
     def pantallas(self):
         return self._p
@@ -393,6 +481,47 @@ class ClienteTest(unittest.TestCase):
         logica.t_movimiento = self.reloj.t
         logica.mover(50, 0)
         self.assertFalse(logica.activo)
+
+    def test_borde_de_abajo(self):
+        salida = SalidaFalsa()
+        logica = LogicaCliente(salida, ABAJO, [].append, reloj=self.reloj)
+        logica.entrar(32768)
+        self.assertEqual(salida.posiciones[-1][1], 1077)
+        self.reloj.t += 0.3
+        logica.t_movimiento = self.reloj.t
+        logica.mover(300, 0)  # Moverse de costado no devuelve el control.
+        self.assertTrue(logica.activo)
+        logica.mover(0, 50)
+        self.assertFalse(logica.activo)
+
+    # ---- Cursor escondido en la PC que no se usa ----------------------------------
+    def test_al_volver_esconde_el_cursor_donde_quedo(self):
+        self.entrar()
+        self.logica.t_movimiento = self.reloj.t
+        self.logica.mover(-50, 0)
+        self.assertFalse(self.logica.activo)
+        # El último movimiento aplicado lo dejó en x=2: ahí está la flechita de verdad.
+        self.assertEqual(self.salida.cursor[-1], ("esconder", 2, self.logica.y))
+
+    def test_al_entrar_primero_se_muestra_y_despues_se_mueve(self):
+        orden = []
+        self.salida.mostrar_cursor = lambda: orden.append("mostrar")
+        self.salida.mover_a = lambda x, y: orden.append("mover")
+        self.logica.entrar(32768)
+        self.assertEqual(orden[:2], ["mostrar", "mover"])
+
+    def test_salir_esconde_solo_si_estaba_aca(self):
+        self.logica.salir()
+        self.assertEqual(self.salida.cursor, [])
+        self.entrar()
+        self.logica.salir()
+        self.assertEqual(self.salida.cursor[-1][0], "esconder")
+
+    def test_al_cortarse_la_conexion_el_cursor_vuelve_a_verse(self):
+        self.entrar()
+        self.logica.mover(-50, 0)
+        self.logica.terminar()
+        self.assertEqual(self.salida.cursor[-1], ("mostrar",))
 
 
 if __name__ == "__main__":

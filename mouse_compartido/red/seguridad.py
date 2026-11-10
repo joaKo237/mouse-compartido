@@ -13,14 +13,14 @@ import hashlib
 import hmac
 import os
 
+from ..comun.pantallas import ABAJO, ARRIBA, DERECHA, IZQUIERDA
 from . import protocolo as P
-from .pantallas import DERECHA, IZQUIERDA
 
 _SAL = b"mouse-compartido:v1"
 _LARGO_NONCE = 16
 _LARGO_FIRMA = 32
-_LADOS = {0: IZQUIERDA, 1: DERECHA}
-_CODIGO_LADO = {IZQUIERDA: 0, DERECHA: 1}
+_LADOS = {0: IZQUIERDA, 1: DERECHA, 2: ARRIBA, 3: ABAJO}
+_CODIGO_LADO = {lado: codigo for codigo, lado in _LADOS.items()}
 
 
 class FalloAutenticacion(Exception):
@@ -69,7 +69,9 @@ def autenticar_como_cliente(conexion, clave, timeout=5.0):
 
     tipo, nonce_s = conexion.esperar_marco(timeout)
     if tipo == P.Tipo.RECHAZADO:
-        raise FalloAutenticacion("El servidor corre una versión distinta")
+        raise FalloAutenticacion(
+            "La otra PC tiene otra versión del programa: copiá la misma carpeta en las dos"
+        )
     if tipo != P.Tipo.DESAFIO or len(nonce_s) != _LARGO_NONCE:
         raise FalloAutenticacion("Lo que respondió no es este programa")
 
