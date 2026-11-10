@@ -1,0 +1,3 @@
+# Los .bat se guardan tal cual, con los finales de línea que espera Windows.
+*.bat -text
+*.exe binary

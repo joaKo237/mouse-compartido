@@ -1,0 +1,5 @@
+# Guarda el PIN: nunca debe subirse.
+config.json
+
+__pycache__/
+*.pyc
