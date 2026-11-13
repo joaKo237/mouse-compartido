@@ -14,9 +14,10 @@ arruinarían el programa en una notebook:
 """
 
 import os
+import re
 import subprocess
 import tempfile
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 
 from .rutas import RAIZ, comando
 
@@ -99,6 +100,32 @@ def _schtasks(*argumentos):
 def esta_activo(nombre=NOMBRE_TAREA):
     ok, _ = _schtasks("/Query", "/TN", nombre)
     return ok
+
+
+def carpeta_de_la_tarea(nombre=NOMBRE_TAREA):
+    """Carpeta desde la que arranca la tarea, o None si no existe o no se pudo leer."""
+    ok, texto = _schtasks("/Query", "/TN", nombre, "/XML")
+    if not ok:
+        return None
+    encontrado = re.search(r"<WorkingDirectory>(.*?)</WorkingDirectory>", texto, re.S)
+    return unescape(encontrado.group(1).strip()) if encontrado else None
+
+
+def apunta_a_otra_copia(nombre=NOMBRE_TAREA):
+    """¿La tarea existe pero abre OTRA copia del programa?
+
+    Pasa al instalar una versión nueva en otra carpeta (o al mover la carpeta): la tarea
+    sigue apuntando a la vieja y al iniciar sesión abriría la versión vieja, o nada si se
+    borró. Windows no distingue mayúsculas en las rutas, así que acá tampoco.
+    """
+    carpeta = carpeta_de_la_tarea(nombre)
+    if carpeta is None:
+        return False
+
+    def normal(ruta):
+        return os.path.normcase(os.path.normpath(str(ruta)))
+
+    return normal(carpeta) != normal(RAIZ)
 
 
 def activar(nombre=NOMBRE_TAREA, elevada=True):

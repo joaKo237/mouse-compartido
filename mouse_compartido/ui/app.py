@@ -390,11 +390,18 @@ class Aplicacion(QObject):
 
     # ---- Windows: firewall y "Enviar a" ---------------------------------------------------
     def _preparar_windows(self):
-        """En otro hilo (tarda un par de segundos): abre el firewall y crea o borra el
-        acceso de "Enviar a"."""
+        """En otro hilo (tarda un par de segundos): abre el firewall, crea o borra el
+        acceso de "Enviar a" y corrige el inicio con Windows si abre otra copia."""
         puerto, con_archivos = self.config.puerto, self.config.compartir_archivos
 
         def preparar():
+            if autoinicio.apunta_a_otra_copia():
+                # El programa se instaló en otra carpeta: la tarea abriría la copia vieja.
+                ok, _ = autoinicio.activar()
+                self._desde_hilo.emit(
+                    "Inicio con Windows: ahora abre esta copia del programa." if ok else
+                    "El inicio con Windows abre otra copia del programa. Para que abra esta, "
+                    "apagalo y volvé a prenderlo en General.")
             cambio, error = firewall.asegurar(puerto)
             if error == "sin permisos":
                 self._desde_hilo.emit(

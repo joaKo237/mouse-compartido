@@ -50,6 +50,37 @@ class TareaInicioTest(unittest.TestCase):
                          r"C:\Mis cosas\mouse & teclado")
 
 
+class TareaDeOtraCopiaTest(unittest.TestCase):
+    """Si el programa se instala en otra carpeta, la tarea vieja tiene que notarse."""
+
+    def setUp(self):
+        from mouse_compartido.sistema import autoinicio
+
+        self.autoinicio = autoinicio
+        self.addCleanup(setattr, autoinicio, "_schtasks", autoinicio._schtasks)
+
+    def _tarea_en(self, carpeta):
+        texto = xml_tarea(r"C:\Python\pythonw.exe", [carpeta + r"\main.py", "--bandeja"],
+                          carpeta, "PC\\Joa")
+        self.autoinicio._schtasks = lambda *argumentos: (True, texto)
+
+    def test_la_de_esta_carpeta_esta_bien(self):
+        self._tarea_en(str(self.autoinicio.RAIZ))
+        self.assertFalse(self.autoinicio.apunta_a_otra_copia())
+        self._tarea_en(str(self.autoinicio.RAIZ).upper())  # Windows no distingue mayúsculas.
+        self.assertFalse(self.autoinicio.apunta_a_otra_copia())
+
+    def test_la_de_una_carpeta_vieja_se_nota(self):
+        self._tarea_en(r"C:\Users\X\Downloads\mouse & teclado viejo")
+        self.assertEqual(self.autoinicio.carpeta_de_la_tarea(),
+                         r"C:\Users\X\Downloads\mouse & teclado viejo")
+        self.assertTrue(self.autoinicio.apunta_a_otra_copia())
+
+    def test_sin_tarea_no_hay_nada_que_corregir(self):
+        self.autoinicio._schtasks = lambda *argumentos: (False, "No existe la tarea.")
+        self.assertFalse(self.autoinicio.apunta_a_otra_copia())
+
+
 @unittest.skipUnless(sys.platform == "win32", "Solo en Windows")
 class FirewallTest(unittest.TestCase):
     """Sin tocar el firewall real: `_correr` se reemplaza por uno que anota los comandos."""

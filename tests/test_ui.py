@@ -239,7 +239,7 @@ class InterfazTest(unittest.TestCase):
 
     def _aplicacion(self, **campos):
         """La app completa con un config.json temporal, sin tocar Windows (firewall,
-        "Enviar a") ni molestar a una copia del programa abierta en esta PC."""
+        "Enviar a", inicio automático) ni molestar a una copia del programa abierta en esta PC."""
         from mouse_compartido.ui import app as modulo_app
         from mouse_compartido.ui import instancia
 
@@ -248,6 +248,8 @@ class InterfazTest(unittest.TestCase):
             (modulo_app.firewall, "asegurar", lambda puerto: (False, "")),
             (modulo_app.enviar_a, "existe", lambda: True),
             (modulo_app.enviar_a, "quitar", lambda: None),
+            (modulo_app.autoinicio, "apunta_a_otra_copia", lambda: False),
+            (modulo_app.autoinicio, "activar", lambda: (False, "no en las pruebas")),
         ):
             self.addCleanup(setattr, modulo, nombre, getattr(modulo, nombre))
             setattr(modulo, nombre, valor)
