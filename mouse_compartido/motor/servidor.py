@@ -1,5 +1,6 @@
 """La PC que tiene el mouse y el teclado físicos: espera al cliente y atiende la red."""
 
+import select
 import socket
 import threading
 import time
@@ -10,18 +11,26 @@ from ..entrada.captura import HiloCaptura
 from ..funciones import crear_funciones
 from ..red import protocolo as P
 from ..red.conexion import Conexion, ConexionCerrada, Sesion, ips_locales
-from ..red.seguridad import FalloAutenticacion, autenticar_como_servidor, derivar_clave
+from ..red.seguridad import (
+    CanalNoDisponible,
+    Emparejamiento,
+    FalloAutenticacion,
+    NoEmparejada,
+    autenticar_como_servidor,
+)
 from . import estado as E
 
 # Un ping chiquito 5 veces por segundo: alcanza para notar los tirones de la red
 # (un ping cada medio segundo se perdía la mayoría) y no carga nada.
 _INTERVALO_PING_S = 0.2
 _TIEMPO_SIN_RESPUESTA_S = 2.0  # Sin noticias del cliente en este tiempo, se corta.
-_ESPERA_TRAS_FALLO_S = 2.0  # Frena a quien intente adivinar el PIN.
+_ESPERA_TRAS_FALLO_S = 0.5  # Frena a quien insista con conexiones inválidas.
 _INTERVALO_PANTALLAS_S = 2.0
 _INTERVALO_LATENCIA_S = 2.0
 _ESPERA_ENTRE_AVISOS_S = 15.0  # Para no llenar la actividad con el mismo aviso.
 _VENTANA_PICO_S = 30.0  # La ventana muestra el peor valor de los últimos 30 segundos.
+# Durante la sesión, cada cuánto se fija si el cliente abrió el canal de datos.
+_INTERVALO_CANALES_S = 0.1
 
 
 class _MedidorLatencia:
@@ -64,8 +73,11 @@ class _MedidorLatencia:
 
 
 class Servidor:
-    def __init__(self, config, captura=None, informante=None):
+    def __init__(self, config, captura=None, informante=None, entregar_canal=None):
+        """`entregar_canal(sock, claves)` recibe el canal de datos ya verificado, con sus
+        claves de cifrado (None = no se usa)."""
         self.config = config
+        self._entregar_canal = entregar_canal
         self.informante = informante or E.Informante(rol="servidor")
         self.captura = (
             captura if captura is not None else HiloCaptura(config, informante=self.informante)
@@ -74,9 +86,18 @@ class Servidor:
         self.escuchando = threading.Event()
         self._conexion = None
         self._pausa_local = False
+        self._oyente = None
+        self._emparejamiento = None
+        self._saludando_datos = threading.Lock()  # Un saludo de canal de datos a la vez.
 
     def detener(self):
         self._parar.set()
+
+    def pedir_canal_datos(self):
+        """El canal de datos lo abre siempre el cliente: acá no hay nada que hacer."""
+
+    def poner_destinos(self, _destinos):
+        """Dónde está la otra PC: solo le sirve al cliente (el servidor espera)."""
 
     def pausar(self, activa):
         """Pausa o reanuda el paso a la otra PC sin cortar la conexión."""
@@ -89,7 +110,7 @@ class Servidor:
         log("Pausado: el mouse se queda en esta PC." if activa else "Reanudado.")
 
     def correr(self):
-        clave = derivar_clave(self.config.pin)
+        self._emparejamiento = Emparejamiento.desde_config(self.config)
         self.informante.actualizar(lado=self.config.lado_otra_pantalla)
         self.captura.iniciar()
         oyente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -99,6 +120,7 @@ class Servidor:
             oyente.bind(("0.0.0.0", self.config.puerto))
             oyente.listen(1)
             oyente.settimeout(0.25)
+            self._oyente = oyente
             self.escuchando.set()
             ips = ips_locales()
             log(f"Servidor esperando en el puerto {self.config.puerto}. "
@@ -111,8 +133,9 @@ class Servidor:
                     sock, direccion = oyente.accept()
                 except socket.timeout:
                     continue
-                self._atender(sock, direccion, clave)
+                self._atender(sock, direccion)
         finally:
+            self._oyente = None
             oyente.close()
             self.captura.detener()
 
@@ -127,12 +150,22 @@ class Servidor:
             cambios["ips"] = ips
         self.informante.actualizar(**cambios)
 
-    def _atender(self, sock, direccion, clave):
+    def _atender(self, sock, direccion):
         conexion = Conexion(sock)
         ip = direccion[0]
         lado_retorno = lado_opuesto(self.config.lado_otra_pantalla)
         try:
-            autenticar_como_servidor(conexion, clave, lado_retorno)
+            claves = autenticar_como_servidor(conexion, self._emparejamiento, lado_retorno)
+            conexion.activar_cifrado(claves.envio, claves.recepcion)
+        except CanalNoDisponible:
+            # Por ejemplo, el canal de datos de una sesión que ya terminó: no es un ataque.
+            conexion.cerrar()
+            return
+        except NoEmparejada as error:
+            log(f"Se rechazó a {ip}: {error}. Si es tu otra PC, emparejalas de nuevo.")
+            conexion.cerrar()
+            self._parar.wait(_ESPERA_TRAS_FALLO_S)
+            return
         except FalloAutenticacion as error:
             log(f"Conexión rechazada desde {ip}: {error}")
             conexion.cerrar()
@@ -143,8 +176,11 @@ class Servidor:
             conexion.cerrar()
             return
 
-        log(f"Cliente conectado desde {ip}. Llevá el cursor al borde de "
-            f"{_frase_lado(self.config.lado_otra_pantalla)} para pasar.")
+        atajo = ""
+        if self.config.atajo_cambiar:
+            atajo = f" o apretá {_NOMBRES_TECLA.get(self.config.tecla_cambiar, 'el atajo')}"
+        log(f"Cliente conectado desde {ip} (conexión cifrada). Llevá el cursor al borde de "
+            f"{_frase_lado(self.config.lado_otra_pantalla)}{atajo} para pasar.")
         # Presentación: nombre y monitores, para que la interfaz los muestre.
         conexion.enviar(P.info(self.informante.datos["nombre_pc"],
                                self.captura.logica.pantallas.como_lista()))
@@ -178,6 +214,7 @@ class Servidor:
         ultimo_dato = ahora
         proximo_ping = ahora
         proxima_lectura_pantallas = ahora + _INTERVALO_PANTALLAS_S
+        proxima_revision_canales = ahora
 
         while not self._parar.is_set():
             try:
@@ -216,10 +253,63 @@ class Servidor:
             if ahora >= proxima_lectura_pantallas:
                 proxima_lectura_pantallas = ahora + _INTERVALO_PANTALLAS_S
                 self.captura.actualizar_pantallas()
+            if ahora >= proxima_revision_canales:
+                proxima_revision_canales = ahora + _INTERVALO_CANALES_S
+                self._revisar_canal_datos(ip)
             if ahora - ultimo_dato > _TIEMPO_SIN_RESPUESTA_S:
                 # Sin esto, si se apaga la otra PC quedarías sin mouse varios segundos.
                 log("El cliente dejó de responder.")
                 return
+
+
+    # ---- Canal de datos (portapapeles) ------------------------------------------------
+    def _revisar_canal_datos(self, ip_sesion):
+        """Si el cliente está abriendo el canal de datos, lo atiende en otro hilo.
+
+        Se mira sin esperar (select con tiempo 0): el hilo de la sesión no se frena.
+        """
+        oyente = self._oyente
+        if oyente is None:
+            return
+        try:
+            listos, _, _ = select.select([oyente], [], [], 0)
+            if not listos:
+                return
+            sock, direccion = oyente.accept()
+        except (OSError, ValueError):
+            return
+        if self._entregar_canal is None or not self._saludando_datos.acquire(blocking=False):
+            sock.close()  # Sin interfaz que lo use, o ya hay un saludo en curso.
+            return
+        threading.Thread(
+            target=self._saludar_canal_datos, args=(sock, direccion[0], ip_sesion),
+            name="saludo-datos", daemon=True,
+        ).start()
+
+    def _saludar_canal_datos(self, sock, ip, ip_sesion):
+        conexion = Conexion(sock)
+        try:
+            if ip != ip_sesion:
+                # Solo la PC que ya está conectada puede abrir el canal de datos.
+                raise CanalNoDisponible(f"pidió el canal de datos desde otra IP ({ip})")
+            claves = autenticar_como_servidor(
+                conexion, self._emparejamiento, lado_opuesto(self.config.lado_otra_pantalla),
+                canales=(P.CANAL_DATOS,),
+            )
+            self._entregar_canal(conexion.entregar_socket(), claves)
+        except CanalNoDisponible:
+            conexion.cerrar()
+        except FalloAutenticacion as error:
+            log(f"Canal de datos rechazado desde {ip}: {error}")
+            conexion.cerrar()
+            self._parar.wait(_ESPERA_TRAS_FALLO_S)
+        except (ConexionCerrada, TimeoutError, OSError):
+            conexion.cerrar()
+        finally:
+            self._saludando_datos.release()
+
+
+_NOMBRES_TECLA = {"bloq_despl": "Bloq Despl", "pausa": "Pausa"}
 
 
 def _frase_lado(lado):

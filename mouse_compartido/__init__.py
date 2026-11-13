@@ -1,3 +1,4 @@
-"""Mouse Compartido: un mouse y un teclado para dos PCs con Windows en la misma LAN."""
+"""Mouse Compartido: un mouse y un teclado para dos PCs con Windows en la misma red."""
 
-__version__ = "0.1.0"
+VERSION = "3.0"
+__version__ = VERSION

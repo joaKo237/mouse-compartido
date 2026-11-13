@@ -15,14 +15,17 @@ no conoce: eso permite agregar funciones sin romper lo que ya anda.
 import json
 import struct
 
-# Versión 2: bordes arriba/abajo, pausa e información de cada PC. Las dos PCs
-# tienen que correr la misma versión (si no, el saludo lo avisa).
-VERSION = 2
+# Versión 3: emparejamiento (sin PIN) y todo cifrado. Las dos PCs tienen que
+# correr la misma versión (si no, el saludo lo avisa).
+VERSION = 3
 MAGIA = b"MCOM"  # Primeros bytes del saludo: confirman que hablamos con este programa.
 
 # Canales: cada conexión TCP declara para qué se usa al saludar.
-# Hoy solo existe la de entrada. El portapapeles grande y los archivos deberán ir
-# por su propia conexión (CANAL_DATOS) para no demorar los movimientos del mouse.
+#   CANAL_ENTRADA: mouse y teclado. La abre el motor y la usa el motor.
+#   CANAL_DATOS: portapapeles, archivos y carpeta compartida. Va por su propia
+#     conexión para que un archivo de varios MB no demore los movimientos del mouse.
+#     La abre el motor (así verifica el emparejamiento igual que la otra) y se la
+#     pasa a la interfaz, que es la que la usa. Ver red/canal_datos.py.
 CANAL_ENTRADA = 0
 CANAL_DATOS = 1
 
@@ -30,7 +33,7 @@ CANAL_DATOS = 1
 class Tipo:
     """Códigos de cada mensaje. Son enteros comunes porque se consultan miles de veces."""
 
-    # Saludo y verificación del PIN.
+    # Saludo y verificación del emparejamiento (ver seguridad.py).
     HOLA = 1
     DESAFIO = 2
     RESPUESTA = 3
@@ -52,17 +55,26 @@ class Tipo:
     RUEDA = 22
     TECLA = 23
 
-    # Reservados para las próximas etapas (todavía no se usan).
+    # Canal de datos (ver red/canal_datos.py).
     PORTAPAPELES = 40
-    ARCHIVO_INICIO = 41
-    ARCHIVO_DATOS = 42
-    ARCHIVO_FIN = 43
+    # Archivos (ver datos/transferencias.py). Los que dicen JSON llevan un dict.
+    ARCHIVOS_OFERTA = 41  # JSON: "copié estos archivos" (todavía no viajan).
+    ARCHIVOS_PEDIDO = 42  # JSON: "mandame los de esa oferta".
+    ARCHIVO_INICIO = 43  # JSON: empieza un archivo (nombre, tamaño, fecha).
+    ARCHIVO_DATOS = 44  # [número de envío: 4 bytes][pedazo del archivo]
+    ARCHIVO_FIN = 45  # JSON: terminó un archivo o un envío entero.
+    ENVIO_CANCELADO = 46  # JSON: alguno de los dos lados canceló un envío.
+    # Carpeta compartida (ver datos/carpeta.py).
+    CARPETA_INDICE = 50  # JSON: la lista de archivos de la carpeta, con fecha y tamaño.
+    CARPETA_PEDIDO = 51  # JSON: "mandame estos archivos de tu carpeta".
+    CARPETA_BORRADOS = 52  # JSON: "borré estos archivos, borralos vos también".
 
 
 # Motivos de rechazo en el saludo.
-RECHAZO_PIN = 1
+RECHAZO_CLAVE = 1  # No demostró conocer la clave del emparejamiento.
 RECHAZO_VERSION = 2
 RECHAZO_CANAL = 3
+RECHAZO_DESCONOCIDO = 4  # Esa PC no es la que está emparejada con esta.
 
 # Códigos de los botones del mouse.
 BOTON_IZQUIERDO = 1
@@ -76,6 +88,7 @@ TECLA_SOLTADA = 1
 TECLA_EXTENDIDA = 2
 
 LARGO_MAXIMO = 65535
+LARGO_SELLO = 16  # Lo que agrega el cifrado a cada mensaje (ver sistema/cripto.py).
 
 # Cuerpos de cada mensaje. "<" = little endian, sin relleno.
 S_MOVER = struct.Struct("<hh")  # dx, dy
@@ -168,10 +181,19 @@ def leer_info(cuerpo):
 
 
 class LectorMarcos:
-    """Reconstruye marcos completos a partir de los pedazos que entrega TCP."""
+    """Reconstruye marcos completos a partir de los pedazos que entrega TCP.
 
-    def __init__(self):
+    Con `descifrar`, cada marco llega cifrado: se descifra antes de separar el tipo.
+    """
+
+    def __init__(self, descifrar=None):
         self._buffer = bytearray()
+        self._descifrar = descifrar
+
+    @property
+    def vacio(self):
+        """True si no quedó ningún pedazo de marco esperando el resto."""
+        return not self._buffer
 
     def alimentar(self, datos):
         """Agrega bytes recibidos y devuelve la lista de (tipo, cuerpo) ya completos."""
@@ -187,7 +209,16 @@ class LectorMarcos:
             fin = posicion + 2 + largo
             if fin > total:
                 break  # El resto del marco todavía no llegó.
-            marcos.append((buffer[posicion + 2], bytes(buffer[posicion + 3:fin])))
+            if self._descifrar is None:
+                marcos.append((buffer[posicion + 2], bytes(buffer[posicion + 3:fin])))
+            else:
+                try:
+                    plano = self._descifrar(bytes(buffer[posicion + 2:fin]))
+                except Exception as error:  # ErrorCripto: alterado o de otra sesión.
+                    raise ErrorProtocolo(f"Mensaje cifrado inválido: {error}") from error
+                if not plano:
+                    raise ErrorProtocolo("Mensaje cifrado vacío")
+                marcos.append((plano[0], plano[1:]))
             posicion = fin
         if posicion:
             del buffer[:posicion]

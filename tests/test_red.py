@@ -1,4 +1,4 @@
-"""Pruebas del formato de mensajes, la conexión y el PIN (sobre sockets reales)."""
+"""Pruebas del formato de mensajes, la conexión, el saludo y el cifrado (sockets reales)."""
 
 import socket
 import threading
@@ -9,13 +9,12 @@ from mouse_compartido.red.conexion import Conexion, ConexionCerrada
 from mouse_compartido.comun.pantallas import IZQUIERDA
 from mouse_compartido.red.seguridad import (
     FalloAutenticacion,
+    NoEmparejada,
     autenticar_como_cliente,
     autenticar_como_servidor,
-    derivar_clave,
 )
 
-CLAVE = derivar_clave("1234abcd")
-OTRA_CLAVE = derivar_clave("otra-clave")
+from .ayuda import CLAVE, EMP_CLIENTE, EMP_INTRUSA, EMP_SERVIDOR
 
 
 def par_de_conexiones():
@@ -97,8 +96,8 @@ class ConexionTest(unittest.TestCase):
         self.assertTrue(a.cerrada, "Tras superar el límite la conexión debe darse por muerta")
 
 
-class PinTest(unittest.TestCase):
-    def _saludar(self, clave_servidor, clave_cliente):
+class SaludoTest(unittest.TestCase):
+    def _saludar(self, emp_servidor, emp_cliente):
         a, b = par_de_conexiones()
         self.addCleanup(a.cerrar)
         self.addCleanup(b.cerrar)
@@ -106,37 +105,54 @@ class PinTest(unittest.TestCase):
 
         def servidor():
             try:
-                autenticar_como_servidor(b, clave_servidor, IZQUIERDA, timeout=2)
-                resultado["servidor"] = "ok"
+                resultado["servidor"] = autenticar_como_servidor(b, emp_servidor, IZQUIERDA,
+                                                                 timeout=2)
             except FalloAutenticacion as error:
                 resultado["servidor"] = error
 
         hilo = threading.Thread(target=servidor)
         hilo.start()
         try:
-            resultado["cliente"] = autenticar_como_cliente(a, clave_cliente, timeout=2)
+            resultado["cliente"] = autenticar_como_cliente(a, emp_cliente, timeout=2)
         except FalloAutenticacion as error:
             resultado["cliente"] = error
         hilo.join()
-        return resultado
+        return resultado, a, b
 
-    def test_pin_correcto(self):
-        resultado = self._saludar(CLAVE, CLAVE)
-        self.assertEqual(resultado, {"servidor": "ok", "cliente": IZQUIERDA})
+    def test_pcs_emparejadas_se_saludan_y_arman_claves_cruzadas(self):
+        resultado, _, _ = self._saludar(EMP_SERVIDOR, EMP_CLIENTE)
+        servidor, cliente = resultado["servidor"], resultado["cliente"]
+        self.assertEqual(cliente.lado, IZQUIERDA)
+        self.assertEqual(servidor.canal, P.CANAL_ENTRADA)
+        # Lo que manda uno es lo que recibe el otro, y cada sentido tiene su clave.
+        self.assertEqual(servidor.envio, cliente.recepcion)
+        self.assertEqual(servidor.recepcion, cliente.envio)
+        self.assertNotEqual(servidor.envio, servidor.recepcion)
 
-    def test_pin_incorrecto_se_rechaza(self):
-        resultado = self._saludar(CLAVE, OTRA_CLAVE)
-        self.assertIsInstance(resultado["servidor"], FalloAutenticacion)
+    def test_cada_conexion_tiene_claves_nuevas(self):
+        primera, _, _ = self._saludar(EMP_SERVIDOR, EMP_CLIENTE)
+        segunda, _, _ = self._saludar(EMP_SERVIDOR, EMP_CLIENTE)
+        self.assertNotEqual(primera["cliente"].envio, segunda["cliente"].envio)
+
+    def test_una_pc_no_emparejada_se_rechaza(self):
+        resultado, _, _ = self._saludar(EMP_SERVIDOR, EMP_INTRUSA)
+        self.assertIsInstance(resultado["servidor"], NoEmparejada)
+        self.assertIsInstance(resultado["cliente"], NoEmparejada)
+
+    def test_con_el_id_correcto_pero_otra_clave_se_rechaza(self):
+        trucha = EMP_CLIENTE.__class__(EMP_CLIENTE.id_propio, EMP_CLIENTE.id_otra, bytes(32))
+        resultado, _, _ = self._saludar(EMP_SERVIDOR, trucha)
+        self.assertIsInstance(resultado["servidor"], NoEmparejada)
         self.assertIsInstance(resultado["cliente"], FalloAutenticacion)
 
-    def test_el_pin_no_viaja_por_la_red(self):
+    def test_la_clave_no_viaja_por_la_red(self):
         a, b = par_de_conexiones()
         self.addCleanup(a.cerrar)
         self.addCleanup(b.cerrar)
         capturado = bytearray()
         original = a._sock.send
         hilo = threading.Thread(
-            target=lambda: autenticar_como_servidor(b, CLAVE, IZQUIERDA, timeout=2)
+            target=lambda: autenticar_como_servidor(b, EMP_SERVIDOR, IZQUIERDA, timeout=2)
         )
 
         class Espia:
@@ -153,13 +169,63 @@ class PinTest(unittest.TestCase):
         real = a.__dict__["_real"]
         a._sock.fileno = real.fileno
         try:
-            autenticar_como_cliente(a, CLAVE, timeout=2)
+            autenticar_como_cliente(a, EMP_CLIENTE, timeout=2)
         finally:
             hilo.join()
             a._sock = real
         self.assertGreater(len(capturado), 0)
-        self.assertNotIn(b"1234abcd", bytes(capturado))
-        self.assertNotIn(CLAVE, bytes(capturado))
+        self.assertNotIn(bytes.fromhex(CLAVE), bytes(capturado))
+
+
+class CifradoTest(unittest.TestCase):
+    def _cifradas(self):
+        a, b = par_de_conexiones()
+        self.addCleanup(a.cerrar)
+        self.addCleanup(b.cerrar)
+        clave_ab, clave_ba = bytes(range(32)), bytes(range(1, 33))
+        a.activar_cifrado(clave_ab, clave_ba)
+        b.activar_cifrado(clave_ba, clave_ab)
+        return a, b
+
+    def _recibir(self, conexion, cantidad):
+        marcos = []
+        for _ in range(50):
+            marcos += conexion.recibir(0.05)
+            if len(marcos) >= cantidad:
+                break
+        return marcos
+
+    def test_los_mensajes_llegan_cifrados_y_se_entienden(self):
+        a, b = self._cifradas()
+        espiado = bytearray()
+        original = a._sock.send
+
+        def espiar(datos):
+            espiado.extend(datos)
+            return original(datos)
+
+        a._sock = type("S", (), {"send": staticmethod(espiar), "close": a._sock.close,
+                                 "fileno": a._sock.fileno})()
+        secreto = P.marco(P.Tipo.INFO, b"contrasenia-secreta")
+        self.assertTrue(a.enviar(P.mover(5, -3)))
+        self.assertTrue(a.enviar(P.tecla(0x41, 0x1E, 0) + secreto))  # Dos marcos juntos.
+        marcos = self._recibir(b, 3)
+        self.assertEqual(marcos[0], (P.Tipo.MOVER, P.S_MOVER.pack(5, -3)))
+        self.assertEqual(marcos[1][0], P.Tipo.TECLA)
+        self.assertEqual(marcos[2], (P.Tipo.INFO, b"contrasenia-secreta"))
+        self.assertNotIn(b"contrasenia-secreta", bytes(espiado))
+        # Cada marco cifrado mide lo mismo que el original más el sello de 16 bytes.
+        self.assertEqual(len(espiado), 7 + 16 + 6 + 16 + len(secreto) + 16)
+
+    def test_un_mensaje_alterado_corta_la_conexion(self):
+        a, b = self._cifradas()
+        a.enviar(P.mover(1, 1))
+        self.assertEqual(len(self._recibir(b, 1)), 1)
+        # Alguien de la red mete un marco inventado: no tiene un sello válido.
+        a._sock.send(P.mover(100, 100) + bytes(16))
+        with self.assertRaises(ConexionCerrada):
+            for _ in range(50):
+                b.recibir(0.05)
 
 
 if __name__ == "__main__":

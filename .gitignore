@@ -1,6 +1,8 @@
-# Guarda el PIN: nunca debe subirse.
+# Guarda la clave del emparejamiento: nunca debe subirse.
 config.json
-# Archivo temporal que se usa al guardar la configuración.
+# Lo que recuerda la carpeta sincronizada (propio de cada PC).
+carpeta-estado.json
+# Archivo temporal que se usa al guardar.
 *.tmp
 
 __pycache__/

@@ -7,15 +7,20 @@ Puntos clave:
     jamás puede quedarse esperando a la red (si tarda, Windows frena el mouse de
     toda la PC y termina quitando el gancho). Si el buffer de TCP se llena, los
     bytes quedan en `_pendiente` y salen en cuanto se pueda.
+  * Cifrado: después del saludo, cada marco viaja cifrado y sellado (ver
+    activar_cifrado). Cifrar un movimiento tarda unos 3 microsegundos.
 """
 
-import collections
 import select
 import socket
+import struct
 import threading
 import time
 
+from ..sistema.cripto import Cifrador
 from . import protocolo as P
+
+_S_LARGO = struct.Struct("<H")
 
 
 class ConexionCerrada(Exception):
@@ -59,7 +64,33 @@ class Conexion:
         self._cerrada = False
         self._lector = P.LectorMarcos()
         self._memoria = bytearray(64 * 1024)
-        self._cola = collections.deque()
+        self._cifrador = None  # Para lo que se manda (None = todavía sin cifrar).
+
+    @property
+    def cifrada(self):
+        return self._cifrador is not None
+
+    def activar_cifrado(self, clave_envio, clave_recepcion):
+        """Desde ahora, todo lo que se manda y recibe va cifrado (se llama tras el saludo)."""
+        with self._candado:
+            self._cifrador = Cifrador(clave_envio)
+            self._lector = P.LectorMarcos(descifrar=Cifrador(clave_recepcion).descifrar)
+
+    def _sellar(self, datos):
+        """Cifra cada marco de `datos`, que puede traer uno o varios seguidos."""
+        cifrar = self._cifrador.cifrar
+        largo = _S_LARGO.unpack_from(datos)[0]
+        if largo + 2 == len(datos):  # Lo normal: un solo marco.
+            cifrado = cifrar(bytes(datos[2:]))
+            return _S_LARGO.pack(len(cifrado)) + cifrado
+        salida = bytearray()
+        posicion = 0
+        while posicion < len(datos):
+            largo = _S_LARGO.unpack_from(datos, posicion)[0]
+            cifrado = cifrar(bytes(datos[posicion + 2:posicion + 2 + largo]))
+            salida += _S_LARGO.pack(len(cifrado)) + cifrado
+            posicion += 2 + largo
+        return bytes(salida)
 
     @property
     def cerrada(self):
@@ -70,6 +101,9 @@ class Conexion:
         with self._candado:
             if self._cerrada:
                 return False
+            if self._cifrador is not None:
+                # Dentro del candado: el orden de cifrado tiene que ser el de envío.
+                datos = self._sellar(datos)
             if self._pendiente:
                 self._pendiente += datos
                 return self._vaciar_sin_candado()
@@ -107,10 +141,6 @@ class Conexion:
 
     def recibir(self, timeout):
         """Espera hasta `timeout` segundos y devuelve los marcos recibidos (o lista vacía)."""
-        if self._cola:
-            marcos = list(self._cola)
-            self._cola.clear()
-            return marcos
         try:
             listos, _, _ = select.select([self._sock], [], [], timeout)
             if not listos:
@@ -131,14 +161,58 @@ class Conexion:
             raise ConexionCerrada(str(error)) from error
 
     def esperar_marco(self, timeout):
-        """Devuelve un solo marco. Lanza TimeoutError si no llega a tiempo."""
+        """Devuelve un solo marco, sin cifrar. Lo usa el saludo.
+
+        Lee justo los bytes de ese marco y ni uno más: lo que venga después (ya
+        cifrado, o del canal de datos) queda intacto para quien siga. Lanza
+        TimeoutError si no llega a tiempo.
+        """
         limite = time.perf_counter() + timeout
-        while not self._cola:
+        cabecera = self._leer_justo(2, limite)
+        largo = _S_LARGO.unpack(cabecera)[0]
+        if largo == 0:
+            self.cerrar()
+            raise ConexionCerrada("Marco de largo cero")
+        datos = self._leer_justo(largo, limite)
+        return datos[0], datos[1:]
+
+    def _leer_justo(self, cantidad, limite):
+        datos = bytearray()
+        while len(datos) < cantidad:
             restante = limite - time.perf_counter()
             if restante <= 0:
                 raise TimeoutError("El otro lado no respondió a tiempo")
-            self._cola.extend(self.recibir(restante))
-        return self._cola.popleft()
+            try:
+                listos, _, _ = select.select([self._sock], [], [], restante)
+                if not listos:
+                    continue
+                parte = self._sock.recv(cantidad - len(datos))
+            except BlockingIOError:
+                continue
+            except (OSError, ValueError) as error:
+                self.cerrar()
+                raise ConexionCerrada(str(error)) from error
+            if not parte:
+                self.cerrar()
+                raise ConexionCerrada("El otro lado cerró la conexión")
+            datos += parte
+        return bytes(datos)
+
+    def entregar_socket(self):
+        """Deja de usar la conexión y devuelve el socket tal cual, en modo bloqueante.
+
+        Sirve para pasarle el canal de datos a la interfaz (otro proceso) apenas
+        terminó el saludo. Lanza ConexionCerrada si quedaron bytes a medio mandar o
+        a medio leer: pasar el socket así mezclaría los mensajes.
+        """
+        with self._candado:
+            if self._cerrada or self._pendiente or not self._lector.vacio:
+                self._cerrar_sin_candado()
+                raise ConexionCerrada("La conexión no quedó limpia para entregarla")
+            self._cerrada = True
+            sock = self._sock
+        sock.setblocking(True)
+        return sock
 
     def _cerrar_sin_candado(self):
         self._cerrada = True

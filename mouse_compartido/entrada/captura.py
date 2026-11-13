@@ -19,6 +19,7 @@ from ..sistema import win32 as W
 from .cursor import VentanaCursorInvisible
 from .logica_captura import (
     LogicaCaptura,
+    PEDIDO_ATAJO,
     PEDIDO_CONECTADO,
     PEDIDO_DESCONECTADO,
     PEDIDO_ESTACIONAR,
@@ -66,6 +67,7 @@ class HiloCaptura(threading.Thread):
         self._t_remoto = 0.0
         self._atraso_max = 0  # El peor atraso del mouse desde la última revisión (ms).
         self._t_aviso_atraso = float("-inf")
+        self._usar_luz = bool(config.luz_otra_pc)
 
     # ---- Lo que usan los otros hilos ----------------------------------------------
     def iniciar(self):
@@ -175,6 +177,7 @@ class HiloCaptura(threading.Thread):
 
         self._parar_temporizador()
         self._quitar_ganchos()
+        self._poner_luz(False)
         if self._ventana:
             self._ventana.destruir()
 
@@ -203,6 +206,9 @@ class HiloCaptura(threading.Thread):
         elif codigo == PEDIDO_PAUSA:
             if logica.pausado and logica.remoto:
                 logica.forzar_local()  # Pide RESTAURAR, que libera el cursor.
+        elif codigo == PEDIDO_ATAJO:
+            x, y = W.posicion_cursor()
+            logica.usar_atajo(x, y)  # Pide ESTACIONAR o RESTAURAR, según hacia dónde va.
 
     def _estacionar_cursor(self):
         """Deja el cursor local escondido y quieto en el centro del monitor."""
@@ -223,6 +229,7 @@ class HiloCaptura(threading.Thread):
         self._temporizador = W.user32.SetTimer(None, 0, _INTERVALO_TIC_MS, None)
         self._tics = 0
         self._t_remoto = time.perf_counter()
+        self._poner_luz(True)
         log("-> Control en la otra PC. Emergencia: Ctrl+Alt+Esc")
         self.informante.actualizar(mouse_aca=False)
 
@@ -232,7 +239,20 @@ class HiloCaptura(threading.Thread):
             W.user32.SetCursorPos(*destino)
         if self._ventana:
             self._ventana.ocultar()
+        self._poner_luz(False)
         self.informante.actualizar(mouse_aca=True)
+
+    def _poner_luz(self, prendida):
+        """La luz de Bloq Despl del teclado indica que estás usando la otra PC.
+
+        Se aprieta Bloq Despl "de mentira" (SendInput) solo si hace falta cambiarla.
+        Los ganchos dejan pasar las teclas simuladas, así que actúa en esta PC.
+        """
+        if not self._usar_luz:
+            return
+        if bool(W.user32.GetKeyState(W.VK_SCROLL) & 1) != prendida:
+            W.enviar_tecla(W.VK_SCROLL, 0, False, False)
+            W.enviar_tecla(W.VK_SCROLL, 0, False, True)
 
     def _parar_temporizador(self):
         if self._temporizador:

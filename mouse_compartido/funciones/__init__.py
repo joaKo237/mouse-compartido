@@ -6,9 +6,10 @@ Para sumar una función:
      escuchar mensajes y `sesion.enviar(Tipo.PORTAPAPELES, datos)` para mandarlos.
   3. Agregala a la lista que devuelve `crear_funciones`.
 
-Los tipos de mensaje ya están reservados en protocolo.py. Para archivos o contenidos
-grandes hay que abrir una segunda conexión con `CANAL_DATOS`: por la de entrada
-cada marco mide como máximo 64 KB y mandar mucho volumen demoraría el mouse.
+Esto es para mensajes chicos que tenga que manejar el motor. Lo que pesa (el
+portapapeles, y en la etapa 6 los archivos) va por el canal de datos, que usa la
+interfaz: ver red/canal_datos.py y ui/portapapeles.py. Por la conexión del mouse
+cada marco mide como máximo 64 KB y mandar mucho volumen demoraría el cursor.
 """
 
 

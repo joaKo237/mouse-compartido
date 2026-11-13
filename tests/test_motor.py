@@ -18,14 +18,15 @@ from pathlib import Path
 
 from mouse_compartido.comun.config import Config
 from mouse_compartido.motor.servidor import Servidor
+from tests.ayuda import emparejada
 from tests.test_integracion import CapturaFalsa
 
 RAIZ = Path(__file__).resolve().parent.parent
 PUERTO = 24997
-CONFIG = Config(
-    rol="cliente", puerto=PUERTO, pin="prueba-motor", ip_servidor="127.0.0.1",
-    max_envios_mouse_hz=0, esquinas_muertas_px=0, enfriamiento_ms=0,
-)
+_COMUNES = dict(puerto=PUERTO, ip_servidor="127.0.0.1", max_envios_mouse_hz=0,
+                esquinas_muertas_px=0, enfriamiento_ms=0)
+CONFIG = Config(**emparejada("cliente", **_COMUNES))
+CONFIG_SERVIDOR = Config(**emparejada("servidor", **_COMUNES))
 
 
 class Motor:
@@ -77,8 +78,8 @@ class Motor:
 
 class MotorTest(unittest.TestCase):
     def arrancar_servidor(self):
-        self.captura = CapturaFalsa(CONFIG)
-        self.servidor = Servidor(replace(CONFIG, rol="servidor"), captura=self.captura)
+        self.captura = CapturaFalsa(CONFIG_SERVIDOR)
+        self.servidor = Servidor(CONFIG_SERVIDOR, captura=self.captura)
         hilo = threading.Thread(target=self.servidor.correr, daemon=True)
         hilo.start()
         self.assertTrue(self.servidor.escuchando.wait(5))
@@ -118,10 +119,10 @@ class MotorTest(unittest.TestCase):
         self.assertEqual(motor.proceso.wait(6), 0)
 
     def test_sin_configuracion_avisa_el_error(self):
-        motor = Motor(replace(CONFIG, pin=""))
+        motor = Motor(replace(CONFIG, emparejado_clave=""))
         self.addCleanup(motor.cerrar)
         error = motor.esperar_estado(lambda e: e["estado"] == "error")
-        self.assertIn("PIN", error["detalle"])
+        self.assertIn("emparejar", error["detalle"])
         self.assertEqual(motor.proceso.wait(5), 2)
 
 

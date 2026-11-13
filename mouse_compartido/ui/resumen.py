@@ -57,10 +57,13 @@ def resumir(motor_activo, datos, error=""):
                            f"{otra} pausó el cambio de PC. Se reanuda desde allá.")
         ip = ((datos.get("otra_pc") or {}).get("ip")) or ""
         con_ip = f"{otra} ({ip})" if ip and ip != otra else otra
-        return Resumen(CONECTADO, "Conectado", f"Conectado con {con_ip}.")
+        ruta = datos.get("ruta")  # "cable" o "Wi-Fi": lo agrega la app (ui/app.py).
+        por = f", por {ruta}" if ruta in ("cable", "Wi-Fi") else ""
+        return Resumen(CONECTADO, "Conectado", f"Conectado con {con_ip}{por}.")
 
     if estado == "esperando":
-        detalle = "Abrí el programa en la otra PC (como cliente) para que se conecte."
+        detalle = ("Abrí el programa en la otra PC para que se conecte (se encuentran solas "
+                   "en la red).")
         if datos.get("pausa_local"):
             detalle += " Además está en pausa."
         return Resumen(ESPERANDO, "Esperando a la otra PC", detalle)

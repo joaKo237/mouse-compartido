@@ -7,6 +7,7 @@
     python main.py cliente      arranca directo como cliente, en la consola
     python main.py prueba       prueba la captura en una sola PC
     python main.py motor        (lo usa la interfaz: no hace falta escribirlo a mano)
+    python main.py enviar RUTAS (lo usa el clic derecho → Enviar a → Mouse Compartido)
 """
 
 import argparse
@@ -17,12 +18,13 @@ from mouse_compartido.comun import config as modulo_config
 from mouse_compartido.comun import registro
 from mouse_compartido.sistema import win32 as W
 
-MODOS = ["app", "menu", "servidor", "cliente", "prueba", "motor"]
+MODOS = ["app", "menu", "servidor", "cliente", "prueba", "motor", "enviar"]
 
 
 def _analizar_argumentos():
     analizador = argparse.ArgumentParser(description="Comparte mouse y teclado entre dos PCs.")
     analizador.add_argument("modo", nargs="?", default="app", choices=MODOS)
+    analizador.add_argument("rutas", nargs="*", help=argparse.SUPPRESS)  # Para "enviar".
     analizador.add_argument(
         "--bandeja", action="store_true", help="abre la interfaz minimizada en la bandeja"
     )
@@ -30,6 +32,9 @@ def _analizar_argumentos():
         "--simular", action="store_true", help="el cliente muestra los eventos en vez de ejecutarlos"
     )
     analizador.add_argument("--config", default=None, help="ruta de otro config.json (pruebas)")
+    analizador.add_argument(
+        "--pid-app", type=int, default=None, help=argparse.SUPPRESS  # Lo pasa la interfaz.
+    )
     return analizador.parse_args()
 
 
@@ -56,12 +61,31 @@ def _correr_app(argumentos, ruta):
     return correr_app(ruta, en_bandeja=argumentos.bandeja)
 
 
+def _enviar(rutas):
+    """Le pasa las rutas al programa abierto, que las manda a la otra PC."""
+    try:
+        from mouse_compartido.ui import instancia
+    except ImportError:
+        _avisar_en_ventana("Falta instalar la interfaz gráfica: abrí iniciar.bat.")
+        return 1
+    rutas = [os.path.abspath(r) for r in rutas]
+    if not rutas:
+        return 0
+    if not instancia.mandar(instancia.mensaje_enviar(rutas)):
+        _avisar_en_ventana("Mouse Compartido no está abierto. Abrilo, esperá a que se conecte "
+                           "con la otra PC y volvé a probar.")
+        return 1
+    return 0
+
+
 def main():
     argumentos = _analizar_argumentos()
     ruta = argumentos.config or modulo_config.RUTA_POR_DEFECTO
 
     if argumentos.modo == "app":
         return _correr_app(argumentos, ruta)
+    if argumentos.modo == "enviar":
+        return _enviar(argumentos.rutas)
 
     # De acá en adelante corre el motor (con o sin consola): ajustes de velocidad.
     W.preparar_proceso()
@@ -80,7 +104,7 @@ def main():
     if argumentos.modo == "motor":
         from mouse_compartido.motor.proceso import correr_motor
 
-        codigo = correr_motor(config)
+        codigo = correr_motor(config, pid_app=argumentos.pid_app)
         registro.vaciar()
         sys.stdout.flush()
         # Salida inmediata: el hilo que lee órdenes puede seguir esperando una

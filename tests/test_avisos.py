@@ -15,6 +15,7 @@ from mouse_compartido.motor.servidor import Servidor, _MedidorLatencia
 from mouse_compartido.sistema import win32 as W
 from mouse_compartido.ui.resumen import texto_latencia
 from tests.test_integracion import CapturaFalsa, SalidaEspia, esperar
+from tests.ayuda import emparejada
 
 
 class InformanteFalso:
@@ -76,7 +77,7 @@ class AtrasoDelMouseTest(unittest.TestCase):
     def test_avisa_si_el_mouse_se_atrasa_dentro_de_la_pc(self):
         from mouse_compartido.entrada import captura as modulo_captura
 
-        hilo = modulo_captura.HiloCaptura(Config(rol="servidor", pin="abcd1234"))
+        hilo = modulo_captura.HiloCaptura(Config(rol="servidor"))
         with mock.patch.object(modulo_captura, "log") as log:
             hilo._atraso_max = 20  # Normal: no avisa.
             hilo._revisar_atraso()
@@ -104,13 +105,13 @@ class SalidaLenta(SalidaEspia):
 
 class ClienteLentoTest(unittest.TestCase):
     def test_el_cliente_avisa_si_tarda_en_mover_el_cursor(self):
-        config = Config(puerto=24998, pin="prueba-lento", ip_servidor="127.0.0.1",
-                        max_envios_mouse_hz=0, esquinas_muertas_px=0, enfriamiento_ms=0,
-                        mostrar_latencia=False)
+        comunes = dict(puerto=24998, ip_servidor="127.0.0.1", max_envios_mouse_hz=0,
+                       esquinas_muertas_px=0, enfriamiento_ms=0, mostrar_latencia=False)
+        config = Config(**emparejada("servidor", **comunes))
         captura = CapturaFalsa(config)
         salida = SalidaLenta()
-        servidor = Servidor(replace(config, rol="servidor"), captura=captura)
-        cliente = Cliente(replace(config, rol="cliente"), salida=salida)
+        servidor = Servidor(config, captura=captura)
+        cliente = Cliente(Config(**emparejada("cliente", **comunes)), salida=salida)
         hilos = [threading.Thread(target=servidor.correr, daemon=True),
                  threading.Thread(target=cliente.correr, daemon=True)]
         with mock.patch.object(modulo_cliente, "log") as log:

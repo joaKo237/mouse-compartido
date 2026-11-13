@@ -18,6 +18,7 @@ PEDIDO_ESTACIONAR = 3
 PEDIDO_VOLVER = 4
 PEDIDO_RESTAURAR = 5
 PEDIDO_PAUSA = 6
+PEDIDO_ATAJO = 7  # Se apretó la tecla para cambiar de PC (ver al_teclado).
 
 _CTRL = {W.VK_LCONTROL, W.VK_RCONTROL}
 _ALT = {W.VK_LMENU, W.VK_RMENU}
@@ -35,6 +36,9 @@ _BOTONES = {
 
 # Tras esconder el cursor pueden llegar eventos calculados desde la posición vieja.
 _VENTANA_ESTACIONADO_S = 0.1
+
+# Teclas de volumen y reproducción (VK_VOLUME_MUTE .. VK_MEDIA_PLAY_PAUSE).
+TECLAS_MULTIMEDIA = frozenset(range(0xAD, 0xB4))
 
 
 def _descifrar_boton(mensaje, dato):
@@ -61,6 +65,10 @@ class LogicaCaptura:
         hz = config.max_envios_mouse_hz
         self.intervalo_envio = 1.0 / hz if hz > 0 else 0.0
         self.enfriamiento = config.enfriamiento_ms / 1000.0
+        # Atajo para cambiar de PC (Bloq Despl o Pausa) y teclas multimedia.
+        self.vk_atajo = config.vk_cambiar if config.atajo_cambiar else None
+        self.multimedia_remota = config.multimedia_pc_activa
+        self.atajo_apretado = False  # Para no cambiar 30 veces si la dejás apretada.
         self.enviar = enviar
         self.pedir = pedir
         self.reloj = reloj
@@ -186,6 +194,15 @@ class LogicaCaptura:
             P.TECLA_EXTENDIDA if banderas_windows & W.LLKHF_EXTENDED else 0
         )
 
+        # La tecla para cambiar de PC. Sin conexión (o en pausa) hace lo de siempre.
+        if vk == self.vk_atajo and (self.remoto or (self.conectado and not self.pausado)):
+            if soltada:
+                self.atajo_apretado = False
+            elif not self.atajo_apretado:
+                self.atajo_apretado = True
+                self.pedir(PEDIDO_ATAJO)
+            return True
+
         if not self.remoto:
             if not ctrl_falso:
                 if soltada:
@@ -200,12 +217,29 @@ class LogicaCaptura:
             return True
         if ctrl_falso:
             return True  # El Windows de destino genera su propio Ctrl falso con AltGr.
+        if vk in TECLAS_MULTIMEDIA and not self.multimedia_remota:
+            return False  # Elegiste que el volumen y la música queden siempre en esta PC.
         self.vaciar_movimiento()
         self.enviar(P.tecla(vk, escaneo & 0xFF, banderas))
         return True
 
     def _atajo_emergencia(self):
         return bool(self.modificadores & _CTRL) and bool(self.modificadores & _ALT)
+
+    def usar_atajo(self, x, y):
+        """Se apretó la tecla para cambiar de PC. (x, y) es dónde está el cursor ahora.
+
+        Si estás en la otra PC, el control vuelve acá. Si estás acá, el cursor entra
+        en la otra PC a la misma altura en la que está (como si hubieras ido derecho
+        hacia ese borde). Devuelve True si cambió algo.
+        """
+        if self.remoto:
+            self.forzar_local()
+            return True
+        if not self.conectado or self.pausado or self.botones_locales:
+            return False
+        self._cruzar(x, y)
+        return True
 
     # ---- Cambios de estado ------------------------------------------------------
     def forzar_local(self):

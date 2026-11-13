@@ -7,6 +7,7 @@ diagnosticar problemas sin ventanas de por medio).
 Para agregar una opción nueva alcanza con sumar una línea a la lista OPCIONES.
 """
 
+import os
 import threading
 from dataclasses import dataclass, replace
 from typing import Callable
@@ -61,7 +62,10 @@ def correr_cliente(config, simular=False):
 
 def correr_prueba(config):
     """Prueba en una sola PC: captura real, cliente simulado que solo muestra los eventos."""
-    config = replace(config, pin="prueba-local", ip_servidor="127.0.0.1")
+    # Un emparejamiento de mentira, de la PC consigo misma (vale solo para esta prueba).
+    identidad = os.urandom(16).hex()
+    config = replace(config, id_pc=identidad, emparejado_id=identidad,
+                     emparejado_clave=os.urandom(32).hex(), ip_servidor="127.0.0.1")
     log("MODO PRUEBA: lo que hagas en la 'otra PC' se muestra acá y no se ejecuta.")
     log(f"Llevá el cursor al borde ({config.lado_otra_pantalla}). Ctrl+Alt+Esc lo devuelve. "
         "Por seguridad, a los 30 segundos vuelve solo.")
@@ -90,7 +94,7 @@ def _preguntar(texto, actual):
 
 def _configurar(config):
     print("\nEnter deja el valor actual.")
-    config.pin = _preguntar("PIN (igual en las dos PCs, mejor 8 caracteres o más)", config.pin)
+    print("  (Para emparejar las PCs usá la ventana: python main.py → Conexión.)")
     while True:
         try:
             config.puerto = int(_preguntar("Puerto (igual en las dos PCs)", config.puerto))
@@ -98,7 +102,8 @@ def _configurar(config):
         except ValueError:
             print("  Tiene que ser un número.")
     config.ip_servidor = _preguntar(
-        "IP del servidor (solo hace falta en el cliente)", config.ip_servidor
+        "IP fija del servidor (opcional, solo en el cliente; vacío = buscarlo solo)",
+        config.ip_servidor,
     )
     while True:
         lado = _preguntar(
@@ -121,7 +126,9 @@ def _ver_diagnostico(config):
     for monitor in W.leer_pantallas().monitores:
         print(f"  {monitor.ancho}x{monitor.alto} desde ({monitor.izq}, {monitor.arriba})")
     print(f"\nAdministrador: {'sí' if W.es_administrador() else 'no'}")
-    print(f"Configuración: {config}".replace(f"pin='{config.pin}'", "pin='***'"))
+    emparejada = config.emparejado_nombre or config.emparejado_id or "ninguna"
+    print(f"PC emparejada: {emparejada}" + ("" if config.emparejada else " (falta emparejar)"))
+    print(f"Configuración: {config}".replace(config.emparejado_clave or "-", "***"))
 
 
 @dataclass
@@ -135,7 +142,7 @@ OPCIONES = [
     Opcion("Iniciar como SERVIDOR (esta PC tiene el mouse y el teclado)", correr_servidor),
     Opcion("Iniciar como CLIENTE (esta PC recibe el control)", correr_cliente),
     Opcion("Probar en esta sola PC (no ejecuta nada en otra)", correr_prueba),
-    Opcion("Configurar (PIN, IP, puerto, lado)", _configurar),
+    Opcion("Configurar (puerto, IP fija, lado)", _configurar),
     Opcion("Ver IP, monitores y estado", _ver_diagnostico),
 ]
 

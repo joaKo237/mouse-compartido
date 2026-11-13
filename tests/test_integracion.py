@@ -15,11 +15,15 @@ from mouse_compartido.entrada.logica_captura import PEDIDO_ESTACIONAR, LogicaCap
 from mouse_compartido.comun.pantallas import Monitor, Pantallas
 from mouse_compartido.motor.servidor import Servidor
 
+from .ayuda import ID_SERVIDOR, emparejada
+
 PUERTO = 24999
-CONFIG = Config(
-    puerto=PUERTO, pin="prueba-1234", ip_servidor="127.0.0.1", max_envios_mouse_hz=0,
+_COMUNES = dict(
+    puerto=PUERTO, ip_servidor="127.0.0.1", max_envios_mouse_hz=0,
     esquinas_muertas_px=0, enfriamiento_ms=0, mostrar_latencia=False,
 )
+CONFIG = Config(**emparejada("servidor", **_COMUNES))
+CONFIG_CLIENTE = Config(**emparejada("cliente", **_COMUNES))
 
 
 class CapturaFalsa:
@@ -106,7 +110,7 @@ class IntegracionTest(unittest.TestCase):
         self.captura = CapturaFalsa(CONFIG)
         self.salida = SalidaEspia()
         self.servidor = Servidor(CONFIG, captura=self.captura)
-        self.cliente = Cliente(config_cliente or CONFIG, salida=self.salida)
+        self.cliente = Cliente(config_cliente or CONFIG_CLIENTE, salida=self.salida)
         self.addCleanup(self.cerrar)
         self.hilo_servidor = threading.Thread(target=self.servidor.correr, daemon=True)
         self.hilo_servidor.start()
@@ -164,11 +168,16 @@ class IntegracionTest(unittest.TestCase):
         self.assertTrue(self.captura.volvio.wait(2))
         self.assertFalse(logica.remoto)
 
-    def test_cliente_con_pin_equivocado_no_entra(self):
-        self.arrancar(config_cliente=replace(CONFIG, pin="otro-pin"))
-        self.hilo_cliente.join(10)
-        self.assertFalse(self.hilo_cliente.is_alive(), "El cliente debe desistir")
+    def test_una_pc_no_emparejada_no_entra(self):
+        # Otra PC, emparejada con el servidor por su cuenta, con otra clave.
+        intrusa = replace(CONFIG_CLIENTE, id_pc="33" * 16, emparejado_id=ID_SERVIDOR,
+                          emparejado_clave="cd" * 32)
+        self.arrancar(config_cliente=intrusa)
+        time.sleep(1.5)
         self.assertFalse(self.captura.conectado.is_set())
+        self.assertIn("no", (self.cliente.informante.datos["detalle"] or "").lower())
+        self.cliente.detener()
+        self.hilo_cliente.join(5)
 
     def test_si_se_cae_el_cliente_vuelve_el_control(self):
         self.arrancar()
@@ -228,8 +237,9 @@ class IntegracionTest(unittest.TestCase):
         time.sleep(0.15)  # Pasado el filtro de saltos que sigue al cruce.
         logica.al_mouse(W.WM_MOUSEMOVE, 960 - 3000, 540, 0, 0)
         self.assertTrue(self.captura.volvio.wait(2))
-        self.assertTrue(self.salida.cursor_escondido)
-        self.assertFalse(self.cliente.informante.leer("mouse_aca"))
+        # "volvió" se marca en la PC principal; a la otra le llega un instante después.
+        self.assertTrue(esperar(lambda: self.salida.cursor_escondido))
+        self.assertTrue(esperar(lambda: not self.cliente.informante.leer("mouse_aca")))
 
     def test_al_cortarse_la_otra_pc_muestra_su_cursor(self):
         self.arrancar()

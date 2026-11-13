@@ -4,7 +4,10 @@ QProcess avisa con señales cuando el motor escribe algo o termina, así la
 ventana nunca se queda esperando y sigue respondiendo.
 """
 
+import base64
 import json
+import os
+import socket
 from collections import deque
 
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
@@ -17,6 +20,7 @@ _ESPERA_CIERRE_MS = 4000  # Si el motor no cierra solo en este tiempo, se lo cie
 class ControlMotor(QObject):
     estado_cambiado = Signal()  # Llegó una foto nueva del motor, o arrancó/terminó.
     nuevo_registro = Signal(str)  # Una línea para la lista de actividad.
+    canal_datos = Signal(object)  # (socket ya verificado, (clave envío, clave recepción)).
 
     def __init__(self, ruta_config, parent=None):
         super().__init__(parent)
@@ -42,7 +46,9 @@ class ControlMotor(QObject):
         self._pendiente = b""
         self._pidio_salir = False
         self._errores.clear()
-        programa, argumentos = rutas.comando("motor", "--config", self._ruta_config)
+        programa, argumentos = rutas.comando(
+            "motor", "--config", self._ruta_config, "--pid-app", str(os.getpid())
+        )
         proceso = QProcess(self)
         proceso.setProgram(str(programa))
         proceso.setArguments(argumentos)
@@ -71,6 +77,14 @@ class ControlMotor(QObject):
         proceso = self._proceso
         QTimer.singleShot(_ESPERA_CIERRE_MS, lambda: self._forzar(proceso))
 
+    def pedir_canal_datos(self):
+        """Pide al motor que vuelva a abrir el canal de datos (si se cortó)."""
+        self._ordenar("canal_datos")
+
+    def poner_destinos(self, destinos):
+        """Le dice al motor dónde se vio a la otra PC: [(ip, prioridad)], 0 = cable."""
+        self._ordenar("destinos", ips=[[ip, prioridad] for ip, prioridad in destinos])
+
     def reiniciar(self):
         """Para aplicar una configuración nueva: cierra y vuelve a arrancar."""
         if self.activo:
@@ -92,9 +106,9 @@ class ControlMotor(QObject):
             proceso.waitForFinished(1000)
 
     # ---- Internos -----------------------------------------------------------------
-    def _ordenar(self, orden):
+    def _ordenar(self, orden, **datos):
         if self._proceso is not None:
-            self._proceso.write((json.dumps({"orden": orden}) + "\n").encode("ascii"))
+            self._proceso.write((json.dumps({"orden": orden, **datos}) + "\n").encode("ascii"))
 
     def _forzar(self, proceso):
         if proceso is not None and proceso is self._proceso:
@@ -124,8 +138,25 @@ class ControlMotor(QObject):
                 hubo_estado = True
             elif evento.get("evento") == "log":
                 self.nuevo_registro.emit(evento.get("texto", ""))
+            elif evento.get("evento") == "canal_datos":
+                self._recibir_canal(evento.get("socket", ""), evento.get("claves", ""))
         if hubo_estado:
             self.estado_cambiado.emit()
+
+    def _recibir_canal(self, pase, claves):
+        """Convierte el "pase" que mandó el motor en una conexión de este proceso."""
+        try:
+            claves = bytes.fromhex(claves)
+            if len(claves) != 64:
+                raise ValueError("faltan las claves de cifrado")
+            sock = socket.fromshare(base64.b64decode(pase))
+        except (ValueError, OSError) as error:
+            self.nuevo_registro.emit(f"No se pudo recibir el canal de datos: {error}")
+            return
+        if self.datos.get("estado") != "conectado":
+            sock.close()  # Llegó tarde: esa sesión ya terminó.
+            return
+        self.canal_datos.emit((sock, (claves[:32], claves[32:])))
 
     def _leer_errores(self):
         if self._proceso is None:

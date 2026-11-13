@@ -1,4 +1,7 @@
-"""Pruebas de lo que toca Windows: la tarea de inicio automático y el cursor invisible."""
+"""Pruebas de lo que toca Windows: inicio automático, cursor invisible y firewall.
+
+El firewall nunca se toca de verdad: se reemplaza netsh por una función que anota.
+"""
 
 import ctypes
 import sys
@@ -48,6 +51,54 @@ class TareaInicioTest(unittest.TestCase):
 
 
 @unittest.skipUnless(sys.platform == "win32", "Solo en Windows")
+class FirewallTest(unittest.TestCase):
+    """Sin tocar el firewall real: `_correr` se reemplaza por uno que anota los comandos."""
+
+    def setUp(self):
+        from mouse_compartido.sistema import firewall
+
+        self.firewall = firewall
+        self.comandos = []
+        self.salida_show = ""
+        self.addCleanup(setattr, firewall, "_correr", firewall._correr)
+        self.addCleanup(setattr, firewall.W, "es_administrador", firewall.W.es_administrador)
+
+        def correr_falso(argumentos, timeout=30):
+            self.comandos.append(argumentos)
+            if "show" in argumentos:
+                return (0, self.salida_show) if self.salida_show else (1, "Ninguna regla")
+            return 0, "Aceptar."
+
+        firewall._correr = correr_falso
+
+    def test_sin_permisos_no_hace_nada(self):
+        self.firewall.W.es_administrador = lambda: False
+        self.assertEqual(self.firewall.asegurar(24850), (False, "sin permisos"))
+        self.assertEqual(self.comandos, [])
+
+    def test_crea_las_reglas_solo_para_la_red_local(self):
+        self.firewall.W.es_administrador = lambda: True
+        self.assertEqual(self.firewall.asegurar(24850), (True, ""))
+        agregadas = [c for c in self.comandos if "add" in c]
+        self.assertEqual(len(agregadas), 2)
+        tcp, udp = agregadas
+        self.assertIn("localport=24850-24851", tcp)
+        self.assertIn("protocol=TCP", tcp)
+        self.assertIn("localport=24851", udp)
+        self.assertIn("protocol=UDP", udp)
+        for regla in agregadas:
+            self.assertIn("remoteip=localsubnet", regla)
+            self.assertIn("action=allow", regla)
+
+    def test_si_ya_estan_no_las_toca(self):
+        self.firewall.W.es_administrador = lambda: True
+        # La salida de netsh viene en el idioma de Windows: solo importa el puerto.
+        self.salida_show = "\n".join(["Nombre de regla:  Mouse Compartido",
+                                      "PuertoLocal:   24850-24851", "PuertoLocal:   24851"])
+        self.assertEqual(self.firewall.asegurar(24850), (False, ""))
+        self.assertFalse(any("add" in c or "delete" in c for c in self.comandos))
+
+
 class CursorInvisibleTest(unittest.TestCase):
     """El error viejo: al arrancar por segunda vez, la flechita ya no se escondía."""
 

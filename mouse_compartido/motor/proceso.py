@@ -10,13 +10,25 @@ microsegundo al cursor.
 Cómo se hablan (el "canal de control"), por la entrada y salida estándar:
   * La interfaz le escribe órdenes, una por línea, en JSON:
         {"orden": "pausar"}   {"orden": "reanudar"}   {"orden": "salir"}
+        {"orden": "canal_datos"}   (pide abrir de nuevo el canal de datos)
+        {"orden": "destinos", "ips": [["10.0.0.1", 0], ["192.168.1.28", 1]]}
+            (dónde se vio a la otra PC en la red; 0 = por cable. Solo le sirve al cliente)
   * El motor le escribe eventos, uno por línea, en JSON:
         {"evento": "log", "texto": "..."}
         {"evento": "estado", "estado": "conectado", ...}   (ver estado.py)
+        {"evento": "canal_datos", "socket": "...", "claves": "..."}   (ver más abajo)
 Si la interfaz se cierra de golpe, la entrada se corta y el motor termina solo:
 nunca queda un motor huérfano bloqueando el mouse.
+
+El canal de datos (portapapeles, archivos, carpeta) lo abre el motor, porque es
+el que tiene el puerto y hace el saludo, pero lo usa la interfaz. Se lo pasa con
+socket.share(): Windows copia la conexión abierta al proceso de la interfaz, y
+por la salida estándar viaja solo el "pase" (unos cientos de bytes en base64) y
+las claves de cifrado de esa conexión. La salida estándar es un caño privado
+entre los dos procesos: nadie más la puede leer.
 """
 
+import base64
 import json
 import sys
 import threading
@@ -47,6 +59,10 @@ def _leer_ordenes(nucleo, entrada):
                 nucleo.pausar(True)
             elif orden == "reanudar":
                 nucleo.pausar(False)
+            elif orden == "canal_datos":
+                nucleo.pedir_canal_datos()
+            elif orden == "destinos":
+                nucleo.poner_destinos(json.loads(linea).get("ips") or [])
             elif orden == "salir":
                 break
     except (OSError, ValueError):
@@ -55,8 +71,33 @@ def _leer_ordenes(nucleo, entrada):
     nucleo.detener()
 
 
-def correr_motor(config, entrada=None):
-    """Arranca el servidor o el cliente según la configuración. Devuelve el código de salida."""
+def _entregador(pid_app):
+    """Devuelve la función que pasa un canal de datos a la interfaz (o None si no hay interfaz)."""
+    if not pid_app:
+        return None
+
+    def entregar(sock, claves):
+        try:
+            pase = sock.share(pid_app)
+        except OSError as error:
+            log(f"No se pudo pasar el canal de datos a la ventana: {error}")
+            return
+        finally:
+            sock.close()  # La interfaz ya tiene su propia copia de la conexión.
+        registro.emitir({
+            "evento": "canal_datos",
+            "socket": base64.b64encode(pase).decode("ascii"),
+            "claves": claves.envio.hex() + claves.recepcion.hex(),
+        })
+
+    return entregar
+
+
+def correr_motor(config, entrada=None, pid_app=None):
+    """Arranca el servidor o el cliente según la configuración. Devuelve el código de salida.
+
+    `pid_app` es el proceso de la interfaz, al que se le pasa el canal de datos.
+    """
     registro.usar_json()
     informante = E.Informante(emitir=registro.emitir, rol=config.rol)
     problemas = config.errores()
@@ -67,10 +108,11 @@ def correr_motor(config, entrada=None):
         log("Aviso: sin permisos de Administrador no se controlan las ventanas elevadas "
             "(Administrador de tareas, instaladores, etc.).")
 
+    entregar_canal = _entregador(pid_app)
     if config.rol == SERVIDOR:
-        nucleo = Servidor(config, informante=informante)
+        nucleo = Servidor(config, informante=informante, entregar_canal=entregar_canal)
     else:
-        nucleo = Cliente(config, informante=informante)
+        nucleo = Cliente(config, informante=informante, entregar_canal=entregar_canal)
 
     hilo = threading.Thread(
         target=_leer_ordenes, args=(nucleo, entrada or sys.stdin), name="ordenes", daemon=True

@@ -59,7 +59,7 @@ COLOR_ESTADO = {
     ESPERANDO: "#ff9f0a",  # Naranja: buscando a la otra PC.
     CONECTADO: "#30c158",  # Verde: todo bien.
     PAUSADO: "#a35cf0",  # Violeta: conectado pero sin cambiar de PC.
-    ERROR: "#ff453a",  # Rojo: algo falló (PIN, puerto...).
+    ERROR: "#ff453a",  # Rojo: algo falló (puerto ocupado, PC no emparejada...).
 }
 
 # Íconos de la fuente de Windows (Segoe Fluent Icons en Windows 11, MDL2 en Windows 10).
@@ -215,7 +215,21 @@ def hoja_de_estilo(t):
     QMenu::item:disabled {{ color: {t['tenue']}; }}
     QMenu::separator {{ height: 1px; background: {t['borde']}; margin: 5px 8px; }}
 
-    QMessageBox {{ background: {t['tarjeta']}; }}
+    QMessageBox, QDialog {{ background: {t['tarjeta']}; }}
+
+    QComboBox {{ background: {t['campo']}; border: 1px solid {t['borde_fuerte']}; border-radius: 8px;
+                 padding: 6px 10px; min-height: 20px; }}
+    QComboBox:focus {{ border: 1px solid {t['acento']}; }}
+    QComboBox::drop-down {{ border: none; width: 24px; }}
+    QComboBox QAbstractItemView {{ background: {t['tarjeta']}; border: 1px solid {t['borde']};
+                                   selection-background-color: {t['seleccion']};
+                                   selection-color: {t['texto']}; outline: 0; padding: 4px; }}
+    QProgressBar {{ background: {t['borde']}; border: none; border-radius: 3px; }}
+    QProgressBar::chunk {{ background: {t['acento']}; border-radius: 3px; }}
+    #FilaPc, #FilaEnvio {{ background: {t['campo']}; border: 1px solid {t['borde']};
+                           border-radius: 10px; }}
+    #Codigo {{ font-size: 30pt; font-weight: 700; color: {t['acento']}; padding: 12px;
+               background: {t['seleccion']}; border-radius: 12px; }}
     """
 
 
